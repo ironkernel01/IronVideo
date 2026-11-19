@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: GPL-2.0-only
+config DRM_IRONVIDEO
+	tristate "IronKernel IronVideo scanout"
+	depends on DRM && OF && HAS_DMA && COMMON_CLK
+	select DRM_KMS_HELPER
+	select DRM_GEM_DMA_HELPER
+	select DRM_CLIENT_SELECTION
+	select VIDEOMODE_HELPERS
+	help
+	  Enable atomic DRM/KMS for the IronVideo AXI4 scanout core with
+	  a fixed pixel clock and a device-tree-specified display timing.

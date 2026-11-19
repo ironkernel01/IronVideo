@@ -1,0 +1,5 @@
+# Preserve the qualified HDL and driver bytes on Windows and Unix checkouts.
+* text=auto eol=lf
+/hdl/** -text
+/driver/** -text
+/testbench/** -text

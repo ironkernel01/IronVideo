@@ -1,0 +1,291 @@
+`timescale 1ns/1ps
+
+// IronVideo framebuffer reader, SystemVerilog-2012.
+// Revision 11-18-2026: initial single-outstanding AXI4 read scheduler.
+// Schedule aligned bursts by line, address page, and available FIFO space.
+// Mark frame and line boundaries and drain accepted reads on stop or error.
+module ironvideo_reader #(
+  parameter int DATA_WIDTH = 64,
+  parameter int MAX_BURST = 64,
+  parameter int FIFO_AW = 9,
+  parameter int ARQOS = 15,
+  parameter int AXI_ID_WIDTH = 1
+) (
+  // Memory AXI clock and active-high synchronous reset.
+  input  logic                    clk,
+  input  logic                    rst,
+
+  // Frame geometry in the memory clock domain, validated and held while running.
+  // Addresses and pitches use bytes. The frame height uses active lines.
+  input  logic                    run,
+  input  logic [31:0]             base,
+  input  logic [31:0]             stride,
+  input  logic [31:0]             line_bytes,
+  input  logic [15:0]             lines,
+
+  // FIFO write port in the memory clock domain. Capacity uses full AXI beats.
+  input  logic [FIFO_AW:0]        fifo_free,
+  output logic                    fifo_write,
+  output logic [DATA_WIDTH-1:0]   fifo_data,
+  output logic                    fifo_sof,
+  output logic                    fifo_sol,
+
+  // AXI4 read channels in the memory clock domain. All requests use ID zero.
+  output logic [AXI_ID_WIDTH-1:0] m_axi_arid,
+  output logic [31:0]             m_axi_araddr,
+  output logic [7:0]              m_axi_arlen,
+  output logic [2:0]              m_axi_arsize,
+  output logic [1:0]              m_axi_arburst,
+  output logic                    m_axi_arlock,
+  output logic [3:0]              m_axi_arcache,
+  output logic [2:0]              m_axi_arprot,
+  output logic [3:0]              m_axi_arqos,
+  output logic                    m_axi_arvalid,
+  input  logic                    m_axi_arready,
+  input  logic [AXI_ID_WIDTH-1:0] m_axi_rid,
+  input  logic [DATA_WIDTH-1:0]   m_axi_rdata,
+  input  logic [1:0]              m_axi_rresp,
+  input  logic                    m_axi_rlast,
+  input  logic                    m_axi_rvalid,
+  output logic                    m_axi_rready,
+
+  // Memory clock status. Idle means the AR and R channels have no open read.
+  // Fault pulses identify response/ID and RLAST errors at the reported byte address.
+  output logic                    idle,
+  output logic                    row_busy,
+  output logic                    row_start,
+  output logic                    row_done,
+  output logic                    resp_fault,
+  output logic                    last_fault,
+  output logic [31:0]             fault_addr
+);
+  localparam int BEAT_BYTES = DATA_WIDTH / 8;
+  localparam int BEAT_SHIFT = $clog2(BEAT_BYTES);
+  localparam logic [12:0] PAGE_BYTES = 13'd4096;
+
+  typedef enum logic [2:0] {
+    IDLE_ST, PLAN_ST, ADDRESS_ST, READ_ST, FAULT_ST
+  } reader_state_t;
+
+  reader_state_t state;
+  logic [31:0] line_addr;
+  logic [31:0] next_addr;
+  logic [31:0] bytes_left;
+  logic [15:0] line_index;
+
+  logic [31:0] available_beats;
+  logic [31:0] line_beats;
+  logic [12:0] page_bytes_left;
+  logic [12:0] page_beats;
+  logic [31:0] planned_beats;
+  logic [8:0] burst_beats;
+  logic [31:0] burst_bytes;
+
+  logic [8:0] beats_left;
+  logic [31:0] beat_addr;
+  logic line_start;
+  logic frame_start;
+  logic stop_requested;
+  logic burst_faulted;
+  logic reported_resp_fault;
+  logic reported_last_fault;
+  logic r_transfer;
+  logic matching_id;
+  logic bad_response;
+  logic bad_last;
+
+  assign available_beats = 32'(fifo_free);
+  assign line_beats = bytes_left >> BEAT_SHIFT;
+  assign page_bytes_left = PAGE_BYTES - {1'b0, next_addr[11:0]};
+  assign page_beats = page_bytes_left >> BEAT_SHIFT;
+  assign burst_bytes = 32'(burst_beats) << BEAT_SHIFT;
+
+  always_comb begin
+    planned_beats = 32'(MAX_BURST);
+    if (planned_beats > line_beats)
+      planned_beats = line_beats;
+    if (planned_beats > 32'(page_beats))
+      planned_beats = 32'(page_beats);
+  end
+
+  assign m_axi_arid = '0;
+  assign m_axi_arsize = 3'(BEAT_SHIFT);
+  assign m_axi_arburst = 2'b01;
+  assign m_axi_arlock = 1'b0;
+  assign m_axi_arcache = 4'b0011;
+  assign m_axi_arprot = 3'b000;
+  assign m_axi_arqos = 4'(ARQOS);
+  assign m_axi_arvalid = !rst && (state == ADDRESS_ST);
+  assign m_axi_rready = !rst && (state == READ_ST);
+  assign idle = !m_axi_arvalid && !m_axi_rready;
+
+  assign r_transfer = m_axi_rvalid && m_axi_rready;
+  assign matching_id = (m_axi_rid == 0);
+  assign bad_response = !matching_id || (m_axi_rresp != 2'b00);
+  assign bad_last = matching_id && (m_axi_rlast != (beats_left == 9'd1));
+  assign burst_faulted = reported_resp_fault || reported_last_fault;
+  assign fifo_write = r_transfer && run && !stop_requested && !burst_faulted && !bad_response && !bad_last;
+  assign fifo_data = m_axi_rdata;
+  assign fifo_sof = fifo_write && frame_start;
+  assign fifo_sol = fifo_write && line_start;
+  wire launch = state == PLAN_ST && run && planned_beats != 0 &&
+                (row_busy || available_beats >= line_beats);
+  assign row_start = launch && !row_busy;
+  assign row_done = fifo_write && (beats_left == 9'd1) && (bytes_left == burst_bytes);
+
+  always_ff @(posedge clk) begin
+    if (rst) begin
+      state <= IDLE_ST;
+      line_addr <= '0;
+      next_addr <= '0;
+      bytes_left <= '0;
+      line_index <= '0;
+      burst_beats <= '0;
+      m_axi_araddr <= '0;
+      m_axi_arlen <= '0;
+      beats_left <= '0;
+      beat_addr <= '0;
+      line_start <= 1'b0;
+      frame_start <= 1'b0;
+      row_busy <= 1'b0;
+      stop_requested <= 1'b0;
+      reported_resp_fault <= 1'b0;
+      reported_last_fault <= 1'b0;
+      resp_fault <= 1'b0;
+      last_fault <= 1'b0;
+      fault_addr <= '0;
+    end else begin
+      resp_fault <= 1'b0;
+      last_fault <= 1'b0;
+      case (state)
+        IDLE_ST: begin
+          if (run) begin
+            line_addr <= base;
+            next_addr <= base;
+            bytes_left <= line_bytes;
+            line_index <= '0;
+            stop_requested <= 1'b0;
+            reported_resp_fault <= 1'b0;
+            reported_last_fault <= 1'b0;
+            state <= PLAN_ST;
+          end
+        end
+
+        PLAN_ST: begin
+          if (!run) begin
+            row_busy <= 1'b0;
+            state <= IDLE_ST;
+          end else if (launch) begin
+            m_axi_araddr <= next_addr;
+            m_axi_arlen <= 8'(planned_beats - 32'd1);
+            burst_beats <= 9'(planned_beats);
+            line_start <= (bytes_left == line_bytes);
+            frame_start <= (bytes_left == line_bytes) && (line_index == 0);
+            row_busy <= 1'b1;
+            state <= ADDRESS_ST;
+          end
+        end
+
+        ADDRESS_ST: begin
+          // Keep the presented request stable even while a stop is pending.
+          if (!run)
+            stop_requested <= 1'b1;
+          if (m_axi_arready) begin
+            beats_left <= burst_beats;
+            beat_addr <= m_axi_araddr;
+            state <= READ_ST;
+          end
+        end
+
+        READ_ST: begin
+          if (!run)
+            stop_requested <= 1'b1;
+          if (r_transfer) begin
+            if ((bad_response && !reported_resp_fault) || (bad_last && !reported_last_fault))
+              fault_addr <= beat_addr;
+            if (bad_response && !reported_resp_fault) begin
+              resp_fault <= 1'b1;
+              reported_resp_fault <= 1'b1;
+            end
+            if (bad_last && !reported_last_fault) begin
+              last_fault <= 1'b1;
+              reported_last_fault <= 1'b1;
+            end
+            if (matching_id) begin
+              if (beats_left != 0) begin
+                beats_left <= beats_left - 9'd1;
+                beat_addr <= beat_addr + 32'(BEAT_BYTES);
+              end
+              line_start <= 1'b0;
+              frame_start <= 1'b0;
+              // Drain through a matching RLAST even after the expected beat count expires.
+              if (m_axi_rlast) begin
+                if (row_done || stop_requested || !run || burst_faulted || bad_response || bad_last)
+                  row_busy <= 1'b0;
+                if (stop_requested || !run) begin
+                  state <= IDLE_ST;
+                end else if (burst_faulted || bad_response || bad_last) begin
+                  state <= FAULT_ST;
+                end else begin
+                  state <= PLAN_ST;
+                  if (bytes_left != burst_bytes) begin
+                    next_addr <= next_addr + burst_bytes;
+                    bytes_left <= bytes_left - burst_bytes;
+                  end else begin
+                    bytes_left <= line_bytes;
+                    if (line_index == lines - 16'd1) begin
+                      line_addr <= base;
+                      next_addr <= base;
+                      line_index <= '0;
+                    end else begin
+                      line_addr <= line_addr + stride;
+                      next_addr <= line_addr + stride;
+                      line_index <= line_index + 16'd1;
+                    end
+                  end
+                end
+              end
+            end
+          end
+        end
+
+        FAULT_ST: begin
+          if (!run)
+            state <= IDLE_ST;
+        end
+
+        default: state <= FAULT_ST;
+      endcase
+    end
+  end
+
+`ifndef SYNTHESIS
+  logic ar_stalled;
+  logic [39:0] stalled_ar;
+
+  initial begin
+    if (DATA_WIDTH != 32 && DATA_WIDTH != 64 && DATA_WIDTH != 128)
+      $fatal(1, "IronVideo AXI data width must be 32, 64, or 128 bits");
+    if (MAX_BURST < 1 || MAX_BURST > 256 || FIFO_AW < 1 || FIFO_AW > 15 ||
+        ARQOS < 0 || ARQOS > 15 || AXI_ID_WIDTH < 1)
+      $fatal(1, "IronVideo AXI reader parameters out of range");
+  end
+
+  always @(posedge clk) begin
+    if (rst) begin
+      ar_stalled <= 1'b0;
+      stalled_ar <= '0;
+    end else begin
+      if (ar_stalled && (!m_axi_arvalid || {m_axi_araddr, m_axi_arlen} != stalled_ar))
+        $fatal(1, "IronVideo changed a stalled AXI read request");
+      if (m_axi_arvalid && (m_axi_araddr[BEAT_SHIFT-1:0] != 0 ||
+          32'(m_axi_araddr[11:0]) + burst_bytes > 32'(PAGE_BYTES)))
+        $fatal(1, "IronVideo issued an unaligned or page-crossing read request");
+      if (fifo_write && fifo_free == 0)
+        $fatal(1, "IronVideo exhausted the reserved FIFO capacity");
+      ar_stalled <= m_axi_arvalid && !m_axi_arready;
+      stalled_ar <= {m_axi_araddr, m_axi_arlen};
+    end
+  end
+`endif
+endmodule
