@@ -3,7 +3,7 @@
 | Publication | Contents |
 | --- | --- |
 | `ironvideo_brief.pdf` | Three-page product brief covering the scanout path, supported configurations, DDR payload requirements and demonstrated modes. |
-| `ironvideo_specification.pdf` | Engineering specification for RTL integration, register programming, row-service measurement, firmware handoff and verification. |
+| `ironvideo_specification.pdf` | Engineering specification for native formats, registers, DDR measurement, firmware and Linux integration, the Nexys bare-metal demo, and verification. |
 
 The matching Markdown files are the publication sources. Both use the architecture illustration in `assets/architecture.png`.
 

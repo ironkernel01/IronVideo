@@ -1,7 +1,7 @@
 # IronVideo
 
 IronVideo is a progressive framebuffer scanout core. It reads little-endian
-XRGB8888 pixels from DDR over a read-only AXI4 master, applies software-defined
+XRGB8888, RGB565, YUV422 (YUYV), or YUV420 (NV12) frames from DDR over a read-only AXI4 master, applies software-defined
 raster timing, and generates RGB, data enable, and horizontal and vertical
 sync. Use the portable SystemVerilog scanout core with an external display
 transmitter, or instantiate the included AMD 7-series AXI-to-TMDS top.
@@ -10,9 +10,12 @@ AXI4-Lite controls timing, framebuffer selection, and diagnostics.
 The 7-series backend produces DVI-compatible TMDS video over an HDMI connector.
 720p60 has been verified on a physical Nexys Video. Independent serialized
 720p60 and 1080p60 benches verify their full rasters in simulation.
-The shared C driver supports U-Boot firmware scanout and Linux DRM/KMS.
-Board design, constraints, device tree, and boot policy belong to the
-integrating project.
+Linux DRM/KMS, U-Boot, and the standalone firmware share a portable register driver.
+The self-contained MicroBlaze/DDR3/UART reference design is in `refdesign/nexys/`.
+It enables all four native formats at 720p60. A UART menu selects the folding
+puzzle cube, color bars and framebuffer format, and reports measured scanout
+bandwidth and animation frame rate.
+Each integrating board supplies its clocks, memory map and constraints.
 
 The three-page product brief is in `documentation/ironvideo_brief.pdf`.
 The full integration and register specification is in
@@ -34,11 +37,12 @@ architecture drawing are in the same documentation directory.
 
 Compile `ironvideo_pkg.sv`, `ironvideo_reset.sv`, `ironvideo_fifo.sv`,
 `ironvideo_reader.sv`, `ironvideo_raster.sv`, `ironvideo_row_stats.sv`,
-and `ironvideo_scanout.sv` in that order from `hdl/` for RGB scanout. Supply `axi_clk` for both AXI interfaces,
+`ironvideo_color.sv`, `ironvideo_plane_bounds.sv`, and `ironvideo_scanout.sv` from `hdl/` for RGB scanout. Supply `axi_clk` for both AXI interfaces,
 `pixel_clk` for the raster, and the common active-low `reset_n`.
 
 | Parameter | Default | Supported values |
 | --- | ---: | --- |
+| `FORMAT_MASK` | 1 | Bit 0 enables XRGB8888, bit 1 RGB565, bit 2 YUV422 (YUYV), and bit 3 YUV420 (NV12). Any nonempty combination is valid. |
 | `DATA_WIDTH` | 64 | 32, 64, or 128 bits |
 | `MAX_BURST` | 64 | 1–256 AXI beats |
 | `FIFO_KIB` | 16 | Requested payload capacity in KiB, clamped to at least 16, rounded up to a power of two, maximum 128 |
@@ -50,7 +54,8 @@ ARCACHE=3, and ARPROT=0. It reserves room for the entire active line before
 presenting its first request, then fetches that line without waiting for
 more FIFO space. Each burst is capped by the configured limit, remaining
 beats on the line, and the next 4 KiB boundary. Only one burst is in flight.
-RREADY remains asserted through the response. ARVALID and its payload remain
+Packed reads keep RREADY asserted through the response. YUV420 reads may pause
+the R channel while inserting expanded FIFO beats. ARVALID and its payload remain
 stable until ARREADY, including during a stop. The reader skips stride padding
 and restarts at the base after the last active line.
 
@@ -60,7 +65,7 @@ the selected bus width. Per-beat markers and the held read beat use additional
 storage. Actual implementation resource use depends on the target memory
 resources and packing.
 
-Each 32-bit little-endian pixel is `0xXXRRGGBB`. A beat begins with the pixel
+In XRGB8888, each 32-bit little-endian pixel is `0xXXRRGGBB`. For this format a beat begins with the pixel
 in bits [31:0] and continues in increasing byte address order. The RGB output
 is `{R,G,B}`. DE is high for the active rectangle and RGB is black in blanking.
 HS and VS are active in the programmed sync intervals at their programmed
@@ -89,7 +94,8 @@ The board design must supply a compatible TMDS_33 output bank, a legal
 OSERDESE2 master/slave placement, and I/O and clock constraints for the
 selected connector. A physical mode also depends on DDR service, serializer
 timing, signal integrity and the display. HDMI audio, HDMI infoframes,
-DDC/EDID, interlace and color-space conversion are outside this interface.
+DDC/EDID and interlace are outside this interface. The TMDS encoder receives
+RGB from the raster, including RGB converted from BT.709 limited-range YUV.
 
 ## Register map
 
@@ -105,7 +111,7 @@ of a configuration, until the first framebuffer pixel is consumed.
 | Offset | Register | Access | Definition |
 | --- | --- | --- | --- |
 | 0x00 | ID | RO | `0x49525644` |
-| 0x04 | VERSION | RO | `0x00010001` |
+| 0x04 | VERSION | RO | `0x00010001` with the legacy XRGB8888-only mask, otherwise `0x00010002` |
 | 0x08 | CAPABILITIES | RO | Data width in bits [7:0], FIFO address bits [15:8], maximum burst beats [24:16] |
 | 0x0c | CONTROL | RW | [0] requested enable, [1] shadow test pattern, [2] commit, [3] snapshot. The two command bits read zero. Preserve bits [1:0] when issuing a snapshot. |
 | 0x10 | STATUS | RO | [0] valid configuration accepted, [1] configuration busy, [2] applied enable, [3] quiesced, [4] snapshot busy, [5] requested enable |
@@ -135,13 +141,18 @@ of a configuration, until the first framebuffer pixel is consumed.
 | 0x70 | FIFO_CAPACITY_BYTES | RO | Actual rounded RAM payload capacity in bytes |
 | 0x74 | DMA_STATUS | RO | [0] fetching a reserved row, [1] AR waiting for ARREADY, [2] R waiting for RVALID, [3] halted by DDR fault, [4] row-time saturation since commit |
 | 0x78 | ROW_LAST_CYCLES | RO | Last completed row's fetch time in pixel ticks, or zero until a row completes |
-| 0x7c | ROW_BYTES | RO | Active framebuffer row size in bytes, or zero in pattern mode or before first commit |
+| 0x7c | ROW_BYTES | RO | Actual DDR bytes in the last completed row, primary row size after commit, zero in pattern mode |
 | 0x80 | ROW_SAMPLES | RO | Completed row fetches since commit, modulo 2^32 |
 | 0x84 | ROW_WORST_CYCLES | RO, clear on read | Longest completed row fetch since this register was last read or the mode was committed |
 | 0x88 | ROW_BEST_CYCLES | RO, clear on read | Shortest completed row fetch since this register was last read or the mode was committed |
 | 0x8c | READ_BEATS | RO | Accepted R beats since commit, modulo 2^32, including discarded beats |
 | 0x90 | READ_BURSTS | RO | Accepted AR requests since commit, modulo 2^32 |
 | 0x94 | READ_ERRORS | RO | DDR fault events since commit, modulo 2^32. Faults first detected together count as one event. |
+| 0x98 | FORMAT_CAPS | RO | v1.2 mask of native memory formats, bit number equals format ID |
+| 0x9c | FORMAT | RW shadow | v1.2 selected ID in bits [1:0] |
+| 0xa0, 0xa4 | UV_BASE, UV_STRIDE | RW shadow | v1.2 YUV420 chroma DMA address and byte stride |
+| 0xa8, 0xac | UV_WINDOW, UV_SIZE | RW shadow | v1.2 chroma aperture start and byte size |
+| 0xb0, 0xb4 | PEAK_RATE_CYCLES, PEAK_RATE_BYTES | RO | v1.2 read cycles first to clear the peak interval and latch its byte count |
 
 A commit validates the nominated pattern or framebuffer mode. Active and
 sync intervals must be positive. Either porch may be zero. Each axis total
@@ -255,7 +266,9 @@ with mode changes when reading multiple registers.
 
 - Calculate effective transfer rate for a sample as
   `ROW_BYTES * pixel_clock_hz / row_cycles` in bytes/s. The shortest row
-  time gives peak measured bandwidth. The longest row time gives worst latency.
+  time gives peak measured bandwidth for constant-size rows. In v1.2 read
+  PEAK_RATE_CYCLES, then PEAK_RATE_BYTES for the matched numerator. YUV420
+  fetches a chroma row only on even lines. The longest row time gives worst latency.
 - Calculate the fraction of the horizontal row budget used as
   `100 * row_cycles / (H_ACTIVE + H_FRONT + H_SYNC + H_BACK)`.
   This is a row-fetch budget measurement, and includes no unrelated DDR traffic.
@@ -263,7 +276,7 @@ with mode changes when reading multiple registers.
 ## Boot and Linux handoff
 
 - In U-Boot, reserve the framebuffer's physical DDR range before allocation
-  or loading. Initialize XRGB8888 pixels, clean the CPU cache to the
+  or loading. Initialize each plane in the chosen native format, clean the CPU cache to the
   point visible to the DDR master as required by the platform, and order the
   framebuffer writes before enabling scanout. Program the validated aperture,
   geometry and timing, then enable and commit. Check status and faults.
@@ -275,10 +288,14 @@ with mode changes when reading multiple registers.
 
 ## Throughput
 
-The scanout needs `width * height * refresh_hz * 4` bytes/s on average, plus
+XRGB8888 scanout needs `width * height * refresh_hz * 4` bytes/s on average, plus
 enough buffering to cover DDR service gaps during active video. For example,
 720p60 requires about 221 MB/s and 1080p60 about 498 MB/s. Raw AXI bandwidth
-is `DATA_WIDTH / 8 * axi_clk_hz`. The scheduler has two idle AXI cycles
+is `DATA_WIDTH / 8 * axi_clk_hz`. RGB565 and YUV422 halve those reads.
+YUV420 uses three eighths of the XRGB8888 payload by reading each UV row once.
+Its repacker requires at least five AXI clocks per three DDR beats across
+a two-line group, giving an ideal 60% raw-capacity ceiling.
+For packed formats the scheduler has two idle AXI cycles
 between bursts even with immediately ready AR and a response on the next
 cycle. With B beats per burst the ideal scheduler efficiency is B/(B+2)
 before arbitration, DDR response latency, R bubbles and short boundary bursts.
@@ -295,7 +312,7 @@ with UNISIM and SecureIP simulation libraries.
 ./simulate.ps1 -VivadoBin 'C:/AMDDesignTools/2026.1/Vivado/bin'
 ```
 
-The nine XSim gates exercise the 32-, 64-, and 128-bit scanout configurations,
+The XSim regressions exercise the 32-, 64-, and 128-bit scanout configurations,
 reader burst caps of 1, 64 and 256 beats, FIFO credit stalls, row statistics,
 and TMDS encoding and serialization. The three full-frame RGB gates cover
 720p60 under modeled DDR arbitration and response stalls. The 64-bit gate
@@ -316,7 +333,9 @@ negative test expects rejection at the first pixel.
 ```powershell
 $aldecBin = 'C:/Aldec/Active-HDL-11.1-x64/bin'
 $vivadoData = 'C:/AMDDesignTools/2026.1/data'
-./activehdl.ps1 -AldecBin $aldecBin -VivadoData $vivadoData
+foreach ($format in 'XRGB8888','RGB565','YUV422','YUV420') {
+    ./activehdl.ps1 -AldecBin $aldecBin -VivadoData $vivadoData -PixelFormat $format
+}
 ./activehdl-negative-clock.ps1 -AldecBin $aldecBin -PositiveReceipt 'build/<positive-run>/receipt.json'
 ```
 
@@ -329,16 +348,19 @@ and input identities before replaying them. All three runners accept
 
 ## Board integration example
 
-Nexys Video uses 128-bit DDR reads at 100 MHz, a 32-beat request limit, a
+The Nexys Linux integration uses 128-bit DDR reads at 100 MHz, a 32-beat request limit, a
 16 KiB FIFO and CTA 720p60 clocks at 74.25 and 371.25 MHz. At 720p60
 the horizontal intervals are 1280/110/40/220 pixels and the vertical
 intervals are 720/5/5/20 lines, in active/front porch/sync/back porch order.
-Both sync polarities are positive. A packed line is 5,120 bytes. On a 128-bit
+Both sync polarities are positive. An XRGB8888 line is 5,120 bytes. On a 128-bit
 port, a prefill of 320 beats buffers one packed row. The 1080p60 simulation
-uses 148.5 MHz pixel and 742.5 MHz serializer clocks. Actual 1080p60 hardware
-requires its own clock, timing, DDR and signal-integrity validation.
+uses 148.5 MHz pixel and 742.5 MHz serializer clocks. The Nexys design is limited to 720p60. Physical 1080p60 requires a
+different board with a transmitter and clock network rated for the serial link.
 
-IronForge supplies the Nexys I/O pinout, clocking, CDC constraints, display
+The standalone `refdesign/nexys/` design uses an 80 MHz CPU/AXI clock,
+a 128-bit read master and all four formats. It runs its demonstration from BRAM.
+
+For the Linux platform, IronForge supplies the Nexys I/O pinout, clocking, CDC constraints, display
 timings, and U-Boot and Linux build integration. Its logical reference is
 `rtl/ironvideo/sources/IronVideo/`, which can bind to a physical IronVideo
 checkout alongside IronForge and RTLNet. Other projects provide their own

@@ -5,9 +5,9 @@
 
 <div class="brief-band">FPGA framebuffer scanout over AXI, with a portable RGB raster and an AMD 7-series TMDS output.</div>
 
-IronVideo turns a framebuffer in DDR into a continuous progressive video stream. A CPU or graphics producer writes little-endian XRGB8888 pixels to memory. IronVideo fetches and displays them while software configures the framebuffer, timing and diagnostics over AXI4-Lite.
+IronVideo turns a framebuffer in DDR into a continuous progressive video stream. A CPU or graphics producer writes XRGB8888, RGB565, YUV422 (YUYV), or YUV420 (NV12) to memory. IronVideo fetches and displays them while software configures the framebuffer, timing and diagnostics over AXI4-Lite.
 
-<div class="brief-note"><strong>Working on Nexys Video.</strong> The AMD 7-series implementation drives a physical display at 1280 × 720, 60 Hz. Independent simulations validate complete serialized rasters at both 720p60 and 1080p60.</div>
+<div class="brief-note"><strong>Working on Nexys Video.</strong> The XRGB8888 Linux platform drives a physical display at 1280 × 720, 60 Hz. Independent simulations validate complete serialized rasters at both 720p60 and 1080p60.</div>
 
 ## Integration choices
 
@@ -15,9 +15,9 @@ IronVideo turns a framebuffer in DDR into a continuous progressive video stream.
 |---|---|---|
 | `ironvideo_scanout` | 24-bit RGB, data enable, horizontal sync and vertical sync | A portable SystemVerilog raster for a board with its own display transmitter |
 | `ironvideo_top` | Three TMDS data pairs and one forwarded differential clock pair | AMD 7-series designs with a TMDS-capable output bank and an HDMI connector |
-| Shared C driver | U-Boot firmware scanout and Linux DRM/KMS | Embedded consoles, simple graphics applications and bring-up diagnostics |
+| Shared C driver | Bare-metal scanout, U-Boot and Linux DRM/KMS | Embedded consoles, simple graphics applications and bring-up diagnostics |
 
-The included transmitter carries DVI-compatible video over the HDMI connector. The board supplies DDR, clock generation, reset and connector pin constraints. Linux and U-Boot use one driver source file and one register map.
+The included transmitter carries DVI-compatible video over the HDMI connector. The board supplies DDR, clock generation, reset and connector pin constraints. The three software environments share format discovery, memory validation and the register programming sequence.
 
 </div>
 <div class="brief-page">
@@ -30,10 +30,11 @@ The included transmitter carries DVI-compatible video over the HDMI connector. T
 
 The reader reserves room for a complete active line before fetching it. It skips stride padding and breaks requests at line and 4 KiB boundaries. The FIFO absorbs variations in DDR service while the raster continues at its externally supplied pixel clock.
 
-| XRGB8888 mode | Active row | Average DDR payload |
+| Framebuffer format | 720p60 DDR payload | 1080p60 DDR payload |
 |---|---:|---:|
-| 1280 × 720 at 60 Hz | 5,120 bytes | 221 MB/s |
-| 1920 × 1080 at 60 Hz | 7,680 bytes | 498 MB/s |
+| XRGB8888 | 221.184 MB/s | 497.664 MB/s |
+| RGB565 or YUV422 (YUYV) | 110.592 MB/s | 248.832 MB/s |
+| YUV420 (NV12) | 82.944 MB/s | 186.624 MB/s |
 
 These are average framebuffer payload rates. Budget for DDR arbitration and worst-case line service as well. The physical Nexys Video implementation uses a 128-bit read port, bursts up to 32 beats and a 16 KiB FIFO. Scanout exposes FIFO low-water, underflow and row-fetch statistics so the integrator can measure contention on the target.
 
@@ -49,8 +50,12 @@ Use AXI4-Lite to set a permitted framebuffer address window, storage stride and 
 | Memory service | Provide an aligned 32-, 64- or 128-bit AXI4 read path. Allow for one outstanding burst and reserve sufficient DDR service under competing load. |
 | Clocks and reset | Supply an AXI clock and a pixel clock. The 7-series backend also requires a phase-related clock at exactly five times the pixel clock. Keep reset asserted through clock startup. |
 | Output hardware | Provide legal OSERDESE2 placement, a TMDS_33-capable bank, connector pin assignments and timing constraints. |
-| Display features | The interface supports progressive XRGB8888 and DVI-compatible TMDS video. Audio, HDMI infoframes, DDC/EDID and scaling require additional logic or software. |
+| Display features | The interface supports progressive RGB and YUV memory formats and DVI-compatible TMDS video. Audio, HDMI infoframes, DDC/EDID and scaling require additional logic or software. |
 
-IronVideo fits systems with a software-rendered framebuffer, including firmware splash screens, Linux text consoles and simple graphics. Designs with rendering, composition or windowed blits can add those functions upstream or in software. Qualify the selected mode on the target board with realistic DDR traffic and the intended display and cable.
+The Nexys reference design in `refdesign/nexys/` connects MicroBlaze, UART, DDR3 and IronVideo. At fixed 720p60 it shows color bars or a rotating, folding cube, with UART controls for all four native framebuffer formats and DDR scanout measurements. Firmware renders the 192 × 144 cube, magnifies it by two and writes changed spans in the selected format. Set `FORMAT_MASK` to select the formats available in an integration. Qualify the chosen mode on the target board under realistic DDR traffic.
+
+<img src="assets/nexys-cube.png" alt="Cube animation from assembled through unfolded and back" style="display:block;width:88%;margin:0 auto;">
+
+**Figure 2.** The cube rotates and unfolds into six tiled panels. The 80 MHz MicroBlaze presented 60 distinct frames per second in all four formats during board testing, with zero missed updates or scanout underflows.
 
 </div>

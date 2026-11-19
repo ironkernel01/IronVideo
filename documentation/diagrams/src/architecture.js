@@ -20,10 +20,10 @@ async function main() {
   wire(slide, 2.11, 2.03, 3.08, 2.03, { start: true, dash: "dash" });
   label(slide, 2.12, 1.81, 0.64, "AXI4-Lite", 7.5, "center");
 
-  box(slide, 0.66, 3.30, 1.45, 0.82, "DDR / AXI fabric", ["External framebuffer", "XRGB8888"]);
-  box(slide, 3.08, 3.30, 1.50, 0.82, "AXI4 reader", ["Aligned read bursts", "Reserves a full row"]);
+  box(slide, 0.66, 3.30, 1.45, 0.82, "DDR / AXI fabric", ["Packed RGB or YUV", "NV12 luma and chroma"]);
+  box(slide, 3.08, 3.30, 1.50, 0.82, "AXI4 reader", ["Aligned read bursts", "Optional UV row cache"]);
   box(slide, 5.12, 3.30, 1.46, 0.82, "Dual-clock FIFO", ["Beats and row markers", "AXI write / pixel read"]);
-  box(slide, 7.15, 3.30, 1.48, 0.82, "Raster", ["Pixel clock domain", "Unpack and generate sync"]);
+  box(slide, 7.15, 3.30, 1.48, 0.82, "Raster", ["Pixel unpack and timing", "Optional YUV to RGB"]);
   box(slide, 9.18, 3.30, 1.64, 0.82, "7-series TMDS", ["Pixel clock encoder", "5× clock serializer"]);
   box(slide, 11.60, 3.30, 1.10, 0.82, "Display sink", ["HDMI connector"]);
 
