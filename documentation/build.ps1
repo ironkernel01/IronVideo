@@ -2,7 +2,12 @@
 param([string] $IronForgeRoot)
 
 $ErrorActionPreference = 'Stop'
-if (!$IronForgeRoot) { $IronForgeRoot = Join-Path $PSScriptRoot '../../IronForge' }
+if (!$IronForgeRoot) {
+    $IronForgeRoot = Join-Path $PSScriptRoot '../../..'
+    if (!(Test-Path -LiteralPath (Join-Path $IronForgeRoot 'IRONFORGE.md'))) {
+        $IronForgeRoot = Join-Path $PSScriptRoot '../../IronForge'
+    }
+}
 $toolRoot = (Resolve-Path -LiteralPath $IronForgeRoot).Path
 $renderer = Join-Path $toolRoot 'documentation/build_pdf.ps1'
 $validator = Join-Path $toolRoot 'documentation/pdf/validate.ps1'

@@ -179,9 +179,8 @@ acknowledges stale faults before programming a new scanout commit.
 
 ## IronForge integration
 
-IronForge binds the canonical checkout at `rtl/ironvideo/sources/IronVideo/`
-and builds it in place. The physical IronVideo checkout can be a sibling of
-the IronForge and RTLNet checkouts. IronForge owns the Nexys device tree,
+IronForge builds the driver from the canonical checkout in `rtl/ironvideo/`.
+IronForge owns the Nexys device tree,
 board glue and boot integration.
 
 `compile_check.py` is an object-only regression for a configured IronForge

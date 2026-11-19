@@ -362,8 +362,7 @@ The standalone `refdesign/nexys/` design uses an 80 MHz CPU/AXI clock,
 a 128-bit read master and all four formats. It runs its demonstration from BRAM.
 
 For the Linux platform, IronForge supplies the Nexys I/O pinout, clocking, CDC constraints, display
-timings, and U-Boot and Linux build integration. Its logical reference is
-`rtl/ironvideo/sources/IronVideo/`, which can bind to a physical IronVideo
-checkout alongside IronForge and RTLNet. Other projects provide their own
+timings, and U-Boot and Linux build integration. IronForge uses the complete
+IronVideo checkout directly in `rtl/ironvideo/`. Other projects provide their own
 board policy and implementation constraints and instantiate the same RTL
 and driver directly from this checkout.

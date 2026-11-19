@@ -12,17 +12,17 @@ The matching Markdown files are the publication sources. Both use the architectu
 From the IronVideo checkout, run the following command in PowerShell. The IronForge checkout supplies the shared publication style and renderer. The tools require Node.js, Chrome or Edge, and Poppler on the rendering host.
 
 ```powershell
-.\documentation\build.ps1 -IronForgeRoot ..\IronForge
+.\documentation\build.ps1
 ```
 
-The command writes both PDFs next to their Markdown sources and validates page bounds, rasterization and link output. Review images are written under `build/documentation/`.
+The command finds IronForge when IronVideo is in `rtl/ironvideo/` or beside the IronForge checkout. For another layout, pass `-IronForgeRoot` with the workspace path. It writes both PDFs next to their Markdown sources and validates page bounds, rasterization and link output. Review images are written under `build/documentation/`.
 
 ## Edit the architecture drawing
 
-Edit the objects and wires in `diagrams/src/architecture.js`. With the IronForge drawing dependencies installed, the following commands generate an editable PowerPoint deck and export the publication figure using LibreOffice and Poppler. Run them from the IronVideo checkout.
+Edit the objects and wires in `diagrams/src/architecture.js`. With the IronForge drawing dependencies installed, the following commands generate an editable PowerPoint deck and export the publication figure using LibreOffice and Poppler. Run them from `rtl/ironvideo/`, or set `$forge` to the IronForge workspace when using a standalone checkout.
 
 ```powershell
-$forge = (Resolve-Path ..\IronForge).Path
+$forge = (Resolve-Path ..\..).Path
 node .\documentation\diagrams\src\architecture.js $forge
 $out = (Resolve-Path .\documentation\diagrams\out).Path
 & "$env:ProgramFiles\LibreOffice\program\soffice.com" --headless --convert-to pdf --outdir $out "$out\architecture.pptx"
