@@ -15,4 +15,4 @@ SECTIONS {
     } > bram
     /DISCARD/ : { *(.comment) *(.note*) *(.eh_frame*) }
 }
-ASSERT(__bss_end <= __stack_top - 4096, "BRAM image leaves less than 4 KiB for stack")
+ASSERT(__bss_end <= __stack_top - 8192, "BRAM image leaves less than 8 KiB for stack")
