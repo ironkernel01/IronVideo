@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Nexys Video rev A, original pin assignments checked against the Digilent schematic.
+set_property -dict {PACKAGE_PIN R4 IOSTANDARD LVCMOS33} [get_ports sys_clock]
+set_property -dict {PACKAGE_PIN G4 IOSTANDARD LVCMOS15} [get_ports resetn]
+set_property -dict {PACKAGE_PIN V18 IOSTANDARD LVCMOS33} [get_ports uart_rx]
+set_property -dict {PACKAGE_PIN AA19 IOSTANDARD LVCMOS33} [get_ports uart_tx]
+set_property -dict {PACKAGE_PIN T1 IOSTANDARD TMDS_33} [get_ports hdmi_clk_p]
+set_property -dict {PACKAGE_PIN U1 IOSTANDARD TMDS_33} [get_ports hdmi_clk_n]
+set_property -dict {PACKAGE_PIN W1 IOSTANDARD TMDS_33} [get_ports {hdmi_data_p[0]}]
+set_property -dict {PACKAGE_PIN AA1 IOSTANDARD TMDS_33} [get_ports {hdmi_data_p[1]}]
+set_property -dict {PACKAGE_PIN AB3 IOSTANDARD TMDS_33} [get_ports {hdmi_data_p[2]}]
+set_property -dict {PACKAGE_PIN Y1 IOSTANDARD TMDS_33} [get_ports {hdmi_data_n[0]}]
+set_property -dict {PACKAGE_PIN AB1 IOSTANDARD TMDS_33} [get_ports {hdmi_data_n[1]}]
+set_property -dict {PACKAGE_PIN AB2 IOSTANDARD TMDS_33} [get_ports {hdmi_data_n[2]}]
+create_clock -name sys_clock -period 10.000 [get_ports sys_clock]
+# Keep both MMCMs in the oscillator pin's CMT column and retain dedicated routing.
+set_property LOC MMCME2_ADV_X1Y2 [get_cells system_i/clocks/inst/system_mmcm]
+set_property LOC MMCME2_ADV_X1Y1 [get_cells system_i/clocks/inst/video_mmcm]
+set_property CLOCK_DEDICATED_ROUTE BACKBONE [get_nets system_i/clocks/inst/clkin]
+set_property CFGBVS VCCO [current_design]
+set_property CONFIG_VOLTAGE 3.3 [current_design]
+set_property BITSTREAM.GENERAL.COMPRESS TRUE [current_design]
