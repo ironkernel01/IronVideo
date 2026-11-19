@@ -14,6 +14,11 @@ The shared C driver supports U-Boot firmware scanout and Linux DRM/KMS.
 Board design, constraints, device tree, and boot policy belong to the
 integrating project.
 
+The three-page product brief is in `documentation/ironvideo_brief.pdf`.
+The full integration and register specification is in
+`documentation/ironvideo_specification.pdf`. Their Markdown sources and
+architecture drawing are in the same documentation directory.
+
 | Module | Interface and role |
 | --- | --- |
 | `ironvideo_scanout` | AXI4-Lite registers and IRQ on `axi_clk`. Validates modes and coordinates configuration and status handshakes with the raster. |
