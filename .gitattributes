@@ -1,5 +1,6 @@
 # Preserve the qualified HDL and driver bytes on Windows and Unix checkouts.
 * text=auto eol=lf
 /hdl/** -text
+/hdl/ironvideo_top.v whitespace=trailing-space,space-before-tab,cr-at-eol
 /driver/** -text
 /testbench/** -text

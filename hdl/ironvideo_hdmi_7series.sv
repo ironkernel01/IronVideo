@@ -6,7 +6,8 @@ module ironvideo_hdmi_7series #(
   parameter int MAX_BURST = 64,
   parameter int FIFO_KIB = 16,
   parameter int ARQOS = 15,
-  parameter int AXI_ID_WIDTH = 1
+  parameter int AXI_ID_WIDTH = 1,
+  parameter int FORMAT_MASK = 1
 ) (
   // Independent AXI clock, phase-related pixel and 5x serial clocks, and active-low reset.
   input logic axi_clk,
@@ -69,7 +70,7 @@ module ironvideo_hdmi_7series #(
 
   ironvideo_scanout #(
     .DATA_WIDTH(DATA_WIDTH), .MAX_BURST(MAX_BURST), .FIFO_KIB(FIFO_KIB),
-    .ARQOS(ARQOS), .AXI_ID_WIDTH(AXI_ID_WIDTH)
+    .ARQOS(ARQOS), .AXI_ID_WIDTH(AXI_ID_WIDTH), .FORMAT_MASK(FORMAT_MASK)
   ) scanout (
     .axi_clk(axi_clk), .pixel_clk(pixel_clk), .reset_n(reset_n),
     .s_axi_awaddr(s_axi_awaddr), .s_axi_awprot(s_axi_awprot),

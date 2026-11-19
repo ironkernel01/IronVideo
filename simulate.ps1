@@ -31,12 +31,12 @@ if ($vivadoData.Target) {
 }
 $runName = 'xsim-{0}-{1}' -f (Get-Date -Format 'yyyyMMdd-HHmmss'), [guid]::NewGuid().ToString('N')
 $runDirectory = Join-Path $outputRoot $runName
-$sources = @('ironvideo_pkg', 'ironvideo_reset', 'ironvideo_fifo', 'ironvideo_reader', 'ironvideo_raster',
+$sources = @('ironvideo_pkg', 'ironvideo_reset', 'ironvideo_fifo', 'ironvideo_reader', 'ironvideo_color', 'ironvideo_plane_bounds', 'ironvideo_raster',
     'ironvideo_row_stats', 'ironvideo_scanout')
 $sources += @('ironvideo_tmds_encoder', 'ironvideo_tmds_lane_7series', 'ironvideo_tmds_7series', 'ironvideo_hdmi_7series')
 $sources = $sources | ForEach-Object { Join-Path $PSScriptRoot "hdl/$_.sv" }
 $sources += Join-Path $PSScriptRoot 'hdl/ironvideo_top.v'
-$sources += @('tb_ironvideo', 'tb_ironvideo_reader_limits', 'tb_ironvideo_row_stats', 'tb_ironvideo_720p',
+$sources += @('ironvideo_format_model', 'tb_ironvideo', 'tb_ironvideo_formats', 'tb_ironvideo_reader_limits', 'tb_ironvideo_nv12_reader', 'tb_ironvideo_row_stats', 'tb_ironvideo_720p',
     'tb_ironvideo_tmds', 'tb_ironvideo_tmds_7series', 'tb_ironvideo_hdmi_7series') |
     ForEach-Object { Join-Path $PSScriptRoot "testbench/$_.sv" }
 $sources += Join-Path $vivadoData.FullName 'verilog/src/glbl.v'
@@ -103,6 +103,8 @@ try {
     $unisim = @('work.glbl', '-L', 'unisims_ver', '-L', 'secureip')
     Invoke-Regression -Top tb_ironvideo -Pass 'TEST PASS: IronVideo 32/64/128-bit regression' -Libraries $unisim
     Invoke-Regression -Top tb_ironvideo_reader_limits -Pass 'TEST PASS: IronVideo reader burst limits'
+    Invoke-Regression -Top tb_ironvideo_nv12_reader -Pass 'TEST PASS: IronVideo NV12 reader widths, chroma reuse, packing and drain'
+    Invoke-Regression -Top tb_ironvideo_formats -Pass 'TEST PASS: IronVideo all 15 format masks, live DDR pixels, plane bounds and row telemetry'
     Invoke-Regression -Top tb_ironvideo_row_stats -Pass 'TEST PASS: IronVideo row fetch statistics'
     Invoke-Regression -Top tb_ironvideo_720p -Pass 'TEST PASS: IronVideo 720p60 full frame'
     Invoke-Regression -Top tb_ironvideo_720p_128 -Pass 'TEST PASS: IronVideo 720p60 128-bit full frame'
@@ -156,6 +158,25 @@ try {
     $familyJson = ($familyReceipt | ConvertTo-Json -Depth 3) + [Environment]::NewLine
     [IO.File]::WriteAllText((Join-Path $runDirectory 'family-rejection.json'), $familyJson, $encoding)
     Write-Host "Unsupported FAMILY rejected. Receipt in $runDirectory/family-rejection.json"
+
+    $maskLogs = [ordered]@{}
+    foreach ($top in 'tb_ironvideo_zero_mask', 'tb_ironvideo_unknown_mask') {
+        $log = "$top-elaborate.log"
+        & (Join-Path $VivadoBin 'xelab.bat') "work.$top" '--log' $log
+        if ($LASTEXITCODE -eq 0 -or !(Select-String -LiteralPath $log -Pattern 'ERROR: .*\bIRONVIDEO_FORMAT_MASK_MUST_BE_1_TO_15\b')) {
+            throw "Malformed FORMAT_MASK was not rejected by $top. See $runDirectory/$log"
+        }
+        $maskLogs[$log] = Get-Sha256 $log
+    }
+    $maskReceipt = [ordered]@{
+        run_id = $runName
+        result = 'EXPECTED ELABORATION REJECTION'
+        positive_receipt_sha256 = Get-Sha256 $positiveReceipt
+        log_sha256 = $maskLogs
+    }
+    [IO.File]::WriteAllText((Join-Path $runDirectory 'format-mask-rejection.json'),
+        ($maskReceipt | ConvertTo-Json -Depth 6), $encoding)
+    Write-Host "Invalid FORMAT_MASK values rejected. Receipt in $runDirectory/format-mask-rejection.json"
 }
 finally {
     Pop-Location

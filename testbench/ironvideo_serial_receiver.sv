@@ -1,7 +1,8 @@
 `timescale 1ns/1fs
 
 // DVI-compatible video receiver. It uses only the four output pairs.
-module ironvideo_serial_receiver #(parameter bit MODE_1080 = 0) (
+module ironvideo_serial_receiver #(parameter bit MODE_1080 = 0, parameter int FORMAT_ID = 0,
+  parameter int STRIDE = (MODE_1080 ? 1920 : 1280)*4) (
   input wire clk_p, clk_n,
   input wire [2:0] data_p, data_n,
   output logic checked = 0
@@ -95,7 +96,7 @@ module ironvideo_serial_receiver #(parameter bit MODE_1080 = 0) (
       for (int y = 0; y < V_TOTAL; y++) begin
         for (int x = 0; x < H_TOTAL; x++) begin
           if (x < H_ACTIVE && y < V_ACTIVE) begin
-            expected_rgb = frame == 0 ? 24'b0 : (24'(y * H_ACTIVE + x) ^ 24'h57_a9_31);
+            expected_rgb = frame == 0 ? 24'b0 : ironvideo_format_model::color(FORMAT_ID,x,y,STRIDE);
             if (is_control(red) || is_control(green) || is_control(blue) ||
                 {decode(red), decode(green), decode(blue)} !== expected_rgb)
               $fatal(1, "TEST FAIL: TMDS frame %0d pixel (%0d,%0d), RGB symbols %h/%h/%h expected RGB %h",
@@ -123,12 +124,13 @@ module ironvideo_serial_receiver #(parameter bit MODE_1080 = 0) (
       $display("%m TMDS frame %0d verified, duration %0.6f ns, elapsed %0.6f ns",
                frame, previous_edge - frame_start, previous_edge - first_start);
     end
-    if ({decode(red), decode(green), decode(blue)} !== 24'h57_a9_31 ||
+    expected_rgb = ironvideo_format_model::color(FORMAT_ID,0,0,STRIDE);
+    if ({decode(red), decode(green), decode(blue)} !== expected_rgb ||
         is_control(red) || is_control(green) || is_control(blue))
       $fatal(1, "TEST FAIL: TMDS stream did not continue at the next frame boundary");
-    check_video_symbol(red, 8'h57, red_disparity);
-    check_video_symbol(green, 8'ha9, green_disparity);
-    check_video_symbol(blue, 8'h31, blue_disparity);
+    check_video_symbol(red, expected_rgb[23:16], red_disparity);
+    check_video_symbol(green, expected_rgb[15:8], green_disparity);
+    check_video_symbol(blue, expected_rgb[7:0], blue_disparity);
     word_number++;
     $display("%m %0d serialized TMDS words verified", word_number);
     checked = 1;

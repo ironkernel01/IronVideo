@@ -2,7 +2,9 @@
 param(
     [string] $AldecBin = 'C:/Aldec/Active-HDL-11.1-x64/bin',
     [string] $VivadoData = 'C:/AMDDesignTools/2026.1/data',
-    [string] $IronForgeRoot
+    [string] $IronForgeRoot,
+    [ValidateSet('XRGB8888','RGB565','YUV422','YUV420')]
+    [string] $PixelFormat = 'XRGB8888'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -27,15 +29,16 @@ $output = Join-Path $outputRoot $runName
 $secureIP = @('secureip/oserdese2/oserdese2_001.vp', 'secureip/oserdese2/oserdese2_002.vp') |
     ForEach-Object { Join-Path $VivadoData $_ }
 $vendorVerilog = @('OSERDESE2', 'OBUFDS') | ForEach-Object { Join-Path $VivadoData "verilog/src/unisims/$_.v" }
-$rtl = @('ironvideo_pkg', 'ironvideo_reset', 'ironvideo_fifo', 'ironvideo_reader', 'ironvideo_raster',
+$rtl = @('ironvideo_pkg', 'ironvideo_reset', 'ironvideo_fifo', 'ironvideo_reader', 'ironvideo_color', 'ironvideo_plane_bounds', 'ironvideo_raster',
     'ironvideo_row_stats', 'ironvideo_scanout', 'ironvideo_tmds_encoder', 'ironvideo_tmds_lane_7series',
     'ironvideo_tmds_7series', 'ironvideo_hdmi_7series') |
     ForEach-Object { Join-Path $PSScriptRoot "hdl/$_.sv" }
 $rtl += Join-Path $PSScriptRoot 'hdl/ironvideo_top.v'
-$testbenches = @('ironvideo_serial_receiver', 'tb_ironvideo_720p', 'tb_ironvideo_720p_serial', 'tb_ironvideo_1080p_serial') |
+$testbenches = @('ironvideo_format_model', 'ironvideo_serial_receiver', 'tb_ironvideo_720p', 'tb_ironvideo_720p_serial', 'tb_ironvideo_1080p_serial') |
     ForEach-Object { Join-Path $PSScriptRoot "testbench/$_.sv" }
 $glbl = Join-Path $VivadoData 'verilog/src/glbl.v'
 $tops = @('tb_ironvideo_720p_serial', 'tb_ironvideo_1080p_serial')
+$formatId = @('XRGB8888','RGB565','YUV422','YUV420').IndexOf($PixelFormat.ToUpperInvariant())
 
 function Get-Manifest([string[]] $Paths) {
     $entries = [ordered]@{}
@@ -69,7 +72,8 @@ function Get-GateResults([string] $Transcript) {
         $outputText = $section.Groups[1].Value
         $results[$gate] = if (!$section.Success) {
             'NOT RUN'
-        } elseif ([regex]::Matches($outputText, [regex]::Escape($pass)).Count -eq 1 -and
+        } elseif ($outputText.Contains("Checking native framebuffer format $formatId at $gate") -and
+            [regex]::Matches($outputText, [regex]::Escape($pass)).Count -eq 1 -and
             [regex]::Matches($outputText, "$expectedWords serialized TMDS words verified").Count -eq 1 -and
             $outputText -notmatch '(?im)TEST FAIL:|^\s*(?:KERNEL:\s*)?(?:FATAL|ERROR)\b') {
             'PASS'
@@ -106,7 +110,7 @@ try {
 
     $macro = @('onerror {quit -code 1}')
     foreach ($top in $tops) {
-        $macro += "asim -t 1fs -L unisims_ver -L secureip work.$top work.glbl"
+        $macro += "asim -t 1fs -L unisims_ver -L secureip -gFORMAT_ID=$formatId work.$top work.glbl"
         $macro += 'run -all'
         $macro += 'endsim'
     }
@@ -145,6 +149,7 @@ finally {
         failure = $failure
         simulator = $simulator
         gates = $gates
+        pixel_format = $PixelFormat
         input_sha256 = $inputs
         tool_sha256 = $tools
         builtin_library_sha256 = $builtinLibraries

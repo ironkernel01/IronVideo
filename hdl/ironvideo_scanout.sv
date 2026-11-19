@@ -8,7 +8,8 @@ module ironvideo_scanout #(
   parameter int MAX_BURST = 64,
   parameter int FIFO_KIB = 16,
   parameter int ARQOS = 15,
-  parameter int AXI_ID_WIDTH = 1
+  parameter int AXI_ID_WIDTH = 1,
+  parameter int FORMAT_MASK = 1
 ) (
   // Independent bus and pixel clocks, plus the shared active-low reset.
   input logic axi_clk,
@@ -64,6 +65,10 @@ module ironvideo_scanout #(
   output logic irq
 );
   import ironvideo_pkg::*;
+  if (FORMAT_MASK < 1 || FORMAT_MASK > 15) begin : invalid_format_mask
+    IRONVIDEO_FORMAT_MASK_MUST_BE_1_TO_15 invalid_parameter ();
+  end
+  localparam bit EXTENDED_ABI = FORMAT_MASK != 1;
   localparam int BEAT_BYTES = DATA_WIDTH/8;
   localparam int FIFO_REQUEST = FIFO_KIB < 16 ? 16 : FIFO_KIB;
   localparam int FIFO_PAYLOAD_BYTES = 1024 << $clog2(FIFO_REQUEST);
@@ -82,7 +87,9 @@ module ironvideo_scanout #(
     REG_FIFO_BYTES = 'h70, REG_DMA_STATUS = 'h74, REG_ROW_LAST = 'h78,
     REG_ROW_BYTES = 'h7c, REG_ROW_SAMPLES = 'h80, REG_ROW_WORST = 'h84,
     REG_ROW_BEST = 'h88, REG_READ_BEATS = 'h8c, REG_READ_BURSTS = 'h90,
-    REG_READ_ERRORS = 'h94;
+    REG_READ_ERRORS = 'h94, REG_FORMAT_CAPS = 'h98, REG_FORMAT = 'h9c,
+    REG_UV_BASE = 'ha0, REG_UV_STRIDE = 'ha4, REG_UV_WINDOW = 'ha8, REG_UV_SIZE = 'hac,
+    REG_PEAK_RATE_CYCLES = 'hb0, REG_PEAK_RATE_BYTES = 'hb4;
   typedef enum logic [1:0] {S_IDLE, S_DRAIN, S_APPLY} config_state_t;
 
   logic axi_rst;
@@ -93,6 +100,8 @@ module ironvideo_scanout #(
   video_snapshot_t snapshot;
   logic [31:0] window_base;
   logic [31:0] window_bytes;
+  logic [31:0] uv_base, uv_stride, uv_window, uv_size;
+  logic [31:0] active_uv_base, active_uv_stride;
   logic configured;
   logic target_enable;
   logic applied_enable;
@@ -151,6 +160,8 @@ module ironvideo_scanout #(
   logic [31:0] row_samples;
   logic [31:0] row_worst;
   logic [31:0] row_best;
+  logic row_extra_chroma;
+  logic [31:0] peak_rate_cycles, peak_rate_bytes;
   logic [31:0] read_beats;
   logic [31:0] read_bursts;
   logic [31:0] read_errors;
@@ -162,8 +173,9 @@ module ironvideo_scanout #(
            && !read_fault && !resp_fault && !last_fault;
   wire low_byte = write_strobes[0];
   wire commit_write = write_addr == REG_CONTROL && low_byte && write_data[2];
-  wire shadow_write_addr = write_addr >= REG_BASE && write_addr <= REG_PREFILL
-           && write_addr[1:0] == 0;
+  wire shadow_write_addr = write_addr[1:0] == 0 &&
+           ((write_addr >= REG_BASE && write_addr <= REG_PREFILL) ||
+            (EXTENDED_ABI && write_addr >= REG_FORMAT && write_addr <= REG_UV_SIZE));
   localparam logic [2:0] VALIDATION_STAGES = 3'd6;
   logic [2:0] validation_wait;
   wire accept_write = aw_pending && w_pending && !write_response_valid
@@ -173,23 +185,28 @@ module ironvideo_scanout #(
   wire snapshot_request = control && write_data[3];
   wire accept_read = s_axi_arready && s_axi_arvalid;
 
-  wire [31:0] line_bytes = {14'b0,shadow.ha,2'b0};
-  logic [15:0] last_line;
-  logic [31:0] offset_low;
-  logic [31:0] offset_high;
-  logic [47:0] last_line_offset;
-  logic [48:0] last_line_addr;
-  logic [48:0] frame_end;
-  logic [32:0] window_end;
+  wire [31:0] line_bytes = plane_row_bytes(shadow.format, shadow.ha);
+  wire [31:0] active_line_bytes = plane_row_bytes(active_config.format, active_config.ha);
+  wire nv12_shadow = shadow.format == FMT_YUV420;
+  logic primary_valid, uv_valid;
+  ironvideo_plane_bounds #(.ALIGN_BITS(ALIGN_BITS)) primary_bounds (
+    .clk(axi_clk), .base(shadow.base), .stride(shadow.stride), .row_bytes(line_bytes),
+    .rows(shadow.va), .window_base(window_base), .window_bytes(window_bytes), .valid(primary_valid)
+  );
+  if (FORMAT_MASK[3]) begin : chroma_bounds
+    ironvideo_plane_bounds #(.ALIGN_BITS(ALIGN_BITS)) bounds (
+      .clk(axi_clk), .base(uv_base), .stride(uv_stride), .row_bytes({16'b0,shadow.ha}),
+      .rows(shadow.va >> 1), .window_base(uv_window), .window_bytes(uv_size), .valid(uv_valid)
+    );
+  end else assign uv_valid = 1'b0;
   logic [16:0] h_active_front, h_sync_back, v_active_front, v_sync_back;
   logic [17:0] h_total, v_total;
   logic timing_nonzero;
-  logic frame_aligned;
   logic frame_fits;
-  logic window_starts_valid;
   logic prefill_valid;
   logic valid_timing;
-  logic valid_frame;
+  wire valid_frame = FORMAT_MASK[shadow.format] && frame_fits && prefill_valid && primary_valid
+                  && (!nv12_shadow || (uv_valid && !shadow.va[0]));
   wire valid_mode = valid_timing && (write_data[1] || valid_frame);
   wire bad_control = control && ((commit && !valid_mode)
             || (busy && (commit || write_data[0] != target_enable))
@@ -201,14 +218,6 @@ module ironvideo_scanout #(
   // control-dependent enable. After a shadow write, intermediate stages can
   // mix old and new fields. A commit waits for all stages to see the new data.
   always_ff @(posedge axi_clk) begin
-    last_line <= shadow.va - 16'd1;
-    offset_low <= last_line * shadow.stride[15:0];
-    offset_high <= last_line * shadow.stride[31:16];
-    last_line_offset <= {offset_high, 16'b0} + {16'b0, offset_low};
-    last_line_addr <= 49'(shadow.base) + 49'(last_line_offset);
-    frame_end <= last_line_addr + 49'(line_bytes);
-    window_end <= {1'b0, window_base} + {1'b0, window_bytes};
-
     h_active_front <= 17'(shadow.ha) + 17'(shadow.hf);
     h_sync_back <= 17'(shadow.hs) + 17'(shadow.hb);
     v_active_front <= 17'(shadow.va) + 17'(shadow.vf);
@@ -219,15 +228,8 @@ module ironvideo_scanout #(
              && shadow.hs != 0 && shadow.vs != 0;
     valid_timing <= timing_nonzero && h_total[17:16] == 0 && v_total[17:16] == 0;
 
-    frame_aligned <= line_bytes[ALIGN_BITS-1:0] == 0
-             && shadow.base[ALIGN_BITS-1:0] == 0
-             && shadow.stride[ALIGN_BITS-1:0] == 0;
-    frame_fits <= shadow.stride >= line_bytes && line_bytes <= FIFO_PAYLOAD_BYTES;
-    window_starts_valid <= shadow.base >= window_base && window_bytes != 0;
+    frame_fits <= fifo_row_bytes(shadow.format, shadow.ha) <= FIFO_PAYLOAD_BYTES;
     prefill_valid <= shadow.prefill != 0 && 32'(shadow.prefill) <= FIFO_DEPTH;
-    valid_frame <= frame_aligned && frame_fits && window_starts_valid && prefill_valid
-             && window_end <= 33'h100000000
-             && frame_end[48:33] == 0 && frame_end[32:0] <= window_end;
   end
 
   always_ff @(posedge axi_clk) begin
@@ -254,11 +256,11 @@ module ironvideo_scanout #(
   logic [31:0] merged_value;
   logic read_known;
   logic write_allowed;
-  logic [31:0] register_value [0:37];
+  logic [31:0] register_value [0:REG_PEAK_RATE_BYTES/4];
 
   always_comb begin
     register_value[REG_ID / 4] = 32'h49525644;
-    register_value[REG_VERSION / 4] = 32'h00010001;
+    register_value[REG_VERSION / 4] = EXTENDED_ABI ? 32'h00010002 : 32'h00010001;
     register_value[REG_CAPS / 4] = {7'b0, 9'(MAX_BURST), 8'(FIFO_AW), 8'(DATA_WIDTH)};
     register_value[REG_CONTROL / 4] = {30'b0, shadow.pattern, target_enable};
     register_value[REG_STATUS / 4] = {26'b0, target_enable, snapshot_busy,
@@ -298,8 +300,17 @@ module ironvideo_scanout #(
     register_value[REG_READ_BEATS / 4] = read_beats;
     register_value[REG_READ_BURSTS / 4] = read_bursts;
     register_value[REG_READ_ERRORS / 4] = read_errors;
+    register_value[REG_FORMAT_CAPS / 4] = FORMAT_MASK;
+    register_value[REG_FORMAT / 4] = 32'(shadow.format);
+    register_value[REG_UV_BASE / 4] = uv_base;
+    register_value[REG_UV_STRIDE / 4] = uv_stride;
+    register_value[REG_UV_WINDOW / 4] = uv_window;
+    register_value[REG_UV_SIZE / 4] = uv_size;
+    register_value[REG_PEAK_RATE_CYCLES / 4] = peak_rate_cycles;
+    register_value[REG_PEAK_RATE_BYTES / 4] = peak_rate_bytes;
 
-    read_known = s_axi_araddr <= REG_READ_ERRORS && s_axi_araddr[1:0] == 0;
+    read_known = s_axi_araddr <= (EXTENDED_ABI ? REG_PEAK_RATE_BYTES : REG_READ_ERRORS)
+              && s_axi_araddr[1:0] == 0;
     read_value = read_known ? register_value[s_axi_araddr[7:2]] : '0;
     write_allowed = write_addr == REG_CONTROL || write_addr == REG_FAULT
             || write_addr == REG_MASK
@@ -334,6 +345,12 @@ module ironvideo_scanout #(
       shadow <= '0;
       window_base <= '0;
       window_bytes <= '0;
+      uv_base <= '0;
+      uv_stride <= '0;
+      uv_window <= '0;
+      uv_size <= '0;
+      active_uv_base <= '0;
+      active_uv_stride <= '0;
       active_config <= '0;
       state <= S_IDLE;
       configured <= 1'b0;
@@ -423,6 +440,8 @@ module ironvideo_scanout #(
               if (commit) begin
                 mode_commit_pending <= 1'b1;
                 active_config <= shadow;
+                active_uv_base <= uv_base;
+                active_uv_stride <= uv_stride;
                 active_config.pattern <= write_data[1];
                 configured <= 1'b1;
               end
@@ -434,6 +453,11 @@ module ironvideo_scanout #(
             REG_MASK: irq_mask <= merged_value[3:0];
             REG_BASE: shadow.base <= merged_value;
             REG_STRIDE: shadow.stride <= merged_value;
+            REG_FORMAT: shadow.format <= pixel_format_t'(merged_value[1:0]);
+            REG_UV_BASE: uv_base <= merged_value;
+            REG_UV_STRIDE: uv_stride <= merged_value;
+            REG_UV_WINDOW: uv_window <= merged_value;
+            REG_UV_SIZE: uv_size <= merged_value;
             REG_WINDOW: window_base <= merged_value;
             REG_SIZE: window_bytes <= merged_value;
             REG_HA: shadow.ha <= merged_value[15:0];
@@ -469,11 +493,13 @@ module ironvideo_scanout #(
   ironvideo_reset pixel_reset (.clk(pixel_clk), .reset_n(reset_n), .rst(pixel_rst));
 
   ironvideo_reader #(.DATA_WIDTH(DATA_WIDTH), .MAX_BURST(MAX_BURST),
-           .FIFO_AW(FIFO_AW), .ARQOS(ARQOS), .AXI_ID_WIDTH(AXI_ID_WIDTH))
+           .FIFO_AW(FIFO_AW), .ARQOS(ARQOS), .AXI_ID_WIDTH(AXI_ID_WIDTH), .SUPPORT_NV12(FORMAT_MASK[3]))
   reader (
     .clk(axi_clk), .rst(axi_rst), .run(reader_run),
     .base(active_config.base), .stride(active_config.stride),
-    .line_bytes({14'b0,active_config.ha,2'b0}), .lines(active_config.va),
+    .line_bytes(active_line_bytes), .lines(active_config.va),
+    .nv12(active_config.format == FMT_YUV420), .uv_base(active_uv_base), .uv_stride(active_uv_stride),
+    .row_extra_chroma(row_extra_chroma),
     .fifo_free(fifo_free), .fifo_write(fifo_write), .fifo_data(fifo_in),
     .fifo_sof(wr_sof), .fifo_sol(wr_sol), .idle(reader_idle),
     .row_busy(row_busy), .row_start(row_start), .row_done(row_done),
@@ -491,7 +517,10 @@ module ironvideo_scanout #(
   ironvideo_row_stats row_stats (
     .pixel_clk(pixel_clk), .pixel_rst(pixel_rst), .axi_clk(axi_clk), .axi_rst(axi_rst),
     .clear_mode(state == S_DRAIN && reader_idle && mode_commit_pending),
-    .mode_row_bytes(active_config.pattern ? 32'd0 : {14'b0, active_config.ha, 2'b0}),
+    .mode_row_bytes(active_config.pattern ? 32'd0 : active_line_bytes),
+    .row_extra_chroma(row_extra_chroma),
+    .take_peak(accept_read && EXTENDED_ABI && s_axi_araddr == REG_PEAK_RATE_CYCLES),
+    .peak_cycles(peak_rate_cycles), .peak_bytes_latched(peak_rate_bytes),
     .row_start(row_start), .row_done(row_done),
     .read_beat(m_axi_rvalid && m_axi_rready), .read_burst(m_axi_arvalid && m_axi_arready),
     .read_error(resp_fault || last_fault),
@@ -511,7 +540,7 @@ module ironvideo_scanout #(
     .rd_valid(fifo_valid), .rd_data({rd_sof,rd_sol,fifo_out}), .rd_count(fifo_count)
   );
 
-  ironvideo_raster #(.DATA_WIDTH(DATA_WIDTH), .FIFO_AW(FIFO_AW))
+  ironvideo_raster #(.DATA_WIDTH(DATA_WIDTH), .FIFO_AW(FIFO_AW), .FORMAT_MASK(FORMAT_MASK))
   raster (
     .clk(pixel_clk), .rst(pixel_rst),
     .config_toggle(config_toggle), .config_enable(target_enable),

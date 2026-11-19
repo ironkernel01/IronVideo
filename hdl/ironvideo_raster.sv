@@ -4,7 +4,8 @@
 // Advance timing every pixel clock and recover stream lock at a frame boundary.
 module ironvideo_raster #(
   parameter int DATA_WIDTH = 64,
-  parameter int FIFO_AW = 9
+  parameter int FIFO_AW = 9,
+  parameter int FORMAT_MASK = 1
 ) (
   // Pixel clock and active-high synchronous reset.
   input logic clk,
@@ -38,7 +39,7 @@ module ironvideo_raster #(
   output logic vs
 );
   import ironvideo_pkg::*;
-  localparam int LANES = DATA_WIDTH / 32;
+  localparam int LANES = DATA_WIDTH / ((FORMAT_MASK & 14) != 0 ? 16 : 32);
   localparam int LANE_BITS = LANES > 1 ? $clog2(LANES) : 1;
   (* ASYNC_REG = "TRUE" *) logic [3:0] config_sync;
   (* ASYNC_REG = "TRUE" *) logic [3:0] snapshot_sync;
@@ -78,7 +79,31 @@ module ironvideo_raster #(
   wire apply_config = pending && flush_latched
             && !fifo_valid && fifo_cursor == flush_target
             && (!running || end_frame);
-  wire [23:0] pixel = fifo_data[32*lane +: 24];
+  wire [LANE_BITS-1:0] last_lane = mode.format == FMT_XRGB8888
+                           ? LANE_BITS'(DATA_WIDTH / 32 - 1) : LANE_BITS'(DATA_WIDTH / 16 - 1);
+  wire [23:0] xrgb_pixel;
+  wire [23:0] rgb565_pixel;
+  wire [23:0] yuv_pixel;
+  if (FORMAT_MASK[0]) assign xrgb_pixel = fifo_data[32*lane +: 24];
+  else assign xrgb_pixel = '0;
+  if (FORMAT_MASK[1]) begin : unpack_rgb565
+    wire [15:0] word16 = fifo_data[16*lane +: 16];
+    assign rgb565_pixel = {word16[15:11],word16[15:13],word16[10:5],word16[10:9],
+                           word16[4:0],word16[4:2]};
+  end else assign rgb565_pixel = '0;
+  if ((FORMAT_MASK & 12) != 0) begin : unpack_yuyv
+    wire [31:0] pair_word = fifo_data[32*(lane >> 1) +: 32];
+    assign yuv_pixel = {lane[0] ? pair_word[23:16] : pair_word[7:0], pair_word[15:8], pair_word[31:24]};
+  end else assign yuv_pixel = '0;
+  wire [23:0] pixel = mode.format == FMT_XRGB8888 ? xrgb_pixel :
+                      mode.format == FMT_RGB565 ? rgb565_pixel : yuv_pixel;
+  logic [23:0] sample;
+  logic sample_yuv;
+  logic raster_de, raster_hs, raster_vs;
+  if ((FORMAT_MASK & 12) != 0) begin : convert_color
+    ironvideo_color color (.clk(clk), .rst(rst), .convert(sample_yuv), .sample(sample),
+      .timing_in({raster_de,raster_hs,raster_vs}), .timing_out({de,hs,vs}), .rgb(rgb));
+  end else assign {rgb,de,hs,vs} = {sample,raster_de,raster_hs,raster_vs};
 
   always_comb begin
     fifo_pop = 1'b0;
@@ -87,7 +112,7 @@ module ironvideo_raster #(
         fifo_pop = 1'b1;
       else if (!locked && !fifo_sof)
         fifo_pop = 1'b1;
-      else if (consume && lane == LANE_BITS'(LANES-1))
+      else if (consume && lane == last_lane)
         fifo_pop = 1'b1;
     end
   end
@@ -114,10 +139,11 @@ module ironvideo_raster #(
       lane <= '0;
       flush_latched <= 1'b0;
       flush_target <= '0;
-      rgb <= '0;
-      de <= 1'b0;
-      hs <= 1'b0;
-      vs <= 1'b0;
+      sample <= '0;
+      sample_yuv <= 1'b0;
+      raster_de <= 1'b0;
+      raster_hs <= 1'b0;
+      raster_vs <= 1'b0;
     end else begin
       config_sync <= {config_sync[2:0], config_toggle};
       snapshot_sync <= {snapshot_sync[2:0], snapshot_toggle};
@@ -127,11 +153,12 @@ module ironvideo_raster #(
         snapshot_ack <= snapshot_sync[3];
       end
 
-      rgb <= '0;
-      de <= running && active;
-      hs <= (x >= h_sync_start && x < h_sync_end && running)
+      sample <= '0;
+      sample_yuv <= consume && mode.format[1];
+      raster_de <= running && active;
+      raster_hs <= (x >= h_sync_start && x < h_sync_end && running)
          ? mode.h_positive : !mode.h_positive;
-      vs <= (y >= v_sync_start && y < v_sync_end && running)
+      raster_vs <= (y >= v_sync_start && y < v_sync_end && running)
          ? mode.v_positive : !mode.v_positive;
 
       if (running) begin
@@ -155,11 +182,11 @@ module ironvideo_raster #(
         lane <= '0;
       end else begin
         if (running && mode.pattern && active)
-          rgb <= {x[7:0], y[7:0], x[7:0] ^ y[7:0]};
+          sample <= {x[7:0], y[7:0], x[7:0] ^ y[7:0]};
         if (consume) begin
-          rgb <= pixel;
+          sample <= pixel;
           locked <= 1'b1;
-          lane <= lane == LANE_BITS'(LANES-1) ? '0 : lane + 1'b1;
+          lane <= lane == last_lane ? '0 : lane + 1'b1;
           if (16'(fifo_count) < low_water)
             low_water <= 16'(fifo_count);
         end

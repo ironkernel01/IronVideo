@@ -43,14 +43,60 @@ def check_register_map():
     rtl_map = dict(re.findall(r"\bREG_(\w+) = 'h([a-f\d]+)", rtl))
     if not c_map or c_map != rtl_map:
         raise ValueError("IronVideo C/RTL register mismatch")
-    for name in ("ID", "VERSION"):
-        value = re.search(rf"^#define IV_{name}\s+0x([\da-f]+)", header, re.M)
-        if not value or f"register_value[REG_{name} / 4] = 32'h{value[1]};" not in rtl:
-            raise ValueError(f"IronVideo C/RTL {name} mismatch")
-    for name in ("ROW_WORST", "ROW_BEST"):
+    def constant(name):
+        return re.search(rf"^#define IV_{name}\s+0x([\da-f]+)", header, re.M)[1]
+
+    if f"register_value[REG_ID / 4] = 32'h{constant('ID')};" not in rtl:
+        raise ValueError("IronVideo C/RTL ID mismatch")
+    versions = f"32'h{constant('VERSION_FORMATS')} : 32'h{constant('VERSION_LEGACY')}"
+    if f"register_value[REG_VERSION / 4] = EXTENDED_ABI ? {versions};" not in rtl:
+        raise ValueError("IronVideo C/RTL version profile mismatch")
+    for name in ("ROW_WORST", "ROW_BEST", "PEAK_RATE_CYCLES"):
         if not re.search(rf"accept_read.*s_axi_araddr == REG_{name}", rtl):
             raise ValueError(f"IronVideo RTL no longer clears {name} on a read")
     return len(c_map)
+
+
+def check_microblaze_object(path):
+    if path.read_bytes()[:20] != struct.pack(
+        "<16sHH", b"\x7fELF\x01\x01\x01", 1, 189
+    ):
+        raise ValueError(f"Output is not a little-endian MicroBlaze ELF object: {path}")
+
+
+def compile_uboot(configured, output, source, bash, env, msys, posix):
+    """Reuse the configured board's actual Kbuild flags with scratch outputs."""
+    cmd_file = configured / "board/xilinx/microblaze-generic/.ironvideo_core.o.cmd"
+    target = "board/xilinx/microblaze-generic/ironvideo_core.o"
+    prefix = f"cmd_{target} := "
+    commands = [line.removeprefix(prefix) for line in cmd_file.read_text().splitlines()
+                if line.startswith(prefix)]
+    if len(commands) != 1 or "-D__UBOOT__" not in commands[0]:
+        raise ValueError("Configured Nexys U-Boot build lacks its IronVideo compiler command")
+    command = commands[0]
+    object_path = output / "ironvideo_uboot.o"
+    dependency_path = output / "ironvideo_uboot.d"
+    replacements = (
+        (r"(?<=-Wp,-MMD,)\S+", posix(dependency_path)),
+        (r"(?<= -o )\S+", posix(object_path)),
+        (r"\S+/driver/ironvideo\.c(?=\s*$)", posix(source)),
+    )
+    for pattern, destination in replacements:
+        command, count = re.subn(pattern, shlex.quote(destination), command)
+        if count != 1:
+            raise ValueError("Unrecognized configured U-Boot object command")
+    shell = [str(bash), "-c", msys.SHELL_PREFIX + command]
+    log = output / "uboot-compile.log"
+    with log.open("wb") as stream:
+        subprocess.run(shell, cwd=configured, env=env, stdout=stream,
+                       stderr=subprocess.STDOUT, check=True)
+    check_microblaze_object(object_path)
+    return {
+        "command": shell,
+        "inputs": hashes([cmd_file, configured / ".config",
+                          configured / "include/generated/autoconf.h"]),
+        "outputs": hashes([object_path, dependency_path, log]),
+    }
 
 
 def main():
@@ -60,6 +106,8 @@ def main():
                         help="IronForge workspace providing the pinned Linux and native build tools")
     parser.add_argument("--amd-root", type=Path)
     parser.add_argument("--msys-root", type=Path)
+    parser.add_argument("--uboot-output", type=Path,
+                        help="optionally compile the firmware adapter using configured Nexys U-Boot flags")
     args = parser.parse_args()
 
     embedded = embedded_workspace()
@@ -104,10 +152,7 @@ def main():
                            stderr=subprocess.STDOUT, check=True)
         if hashes(config_paths) != old_config:
             raise ValueError("Kbuild changed the configured kernel inputs")
-        if obj.read_bytes()[:20] != struct.pack(
-            "<16sHH", b"\x7fELF\x01\x01\x01", 1, 189
-        ):
-            raise ValueError("Driver output is not a little-endian MicroBlaze ELF object")
+        check_microblaze_object(obj)
         # Kbuild records actual translation-unit dependencies using POSIX paths
         # relative to MO or absolute paths. Hash those files directly.
         deps = set()
@@ -120,8 +165,9 @@ def main():
         source = DRIVER / "ironvideo.c"
         header = DRIVER / "ironvideo_regs.h"
         source_entry = f"source_ironvideo_drm.o := {posix(source)}"
-        if source_entry not in cmd_log.read_text().splitlines() or header not in deps:
-            raise ValueError("Kbuild did not record the canonical driver source and header")
+        if (source_entry not in cmd_log.read_text().splitlines() or header not in deps
+                or DRIVER / "ironvideo_core.h" not in deps):
+            raise ValueError("Kbuild did not record the canonical driver source and headers")
         receipt = {
             "command": shell,
             "canonical_linux": str(kernel),
@@ -142,9 +188,12 @@ def main():
             "outputs": hashes([obj, cmd_log, log]),
             "scope": "MicroBlaze object only",
         }
+        if args.uboot_output:
+            receipt["uboot"] = compile_uboot(args.uboot_output.resolve(strict=True),
+                                             output, source, tools / "bash.exe", env, msys, posix)
         (output / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n",
                                              encoding="utf-8")
-    print(f"PASS ({registers} registers and MicroBlaze ELF object)")
+    print(f"PASS ({registers} registers and {'Linux/U-Boot' if args.uboot_output else 'Linux'} MicroBlaze ELF objects)")
 
 
 if __name__ == "__main__":

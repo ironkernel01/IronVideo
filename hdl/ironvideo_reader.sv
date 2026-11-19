@@ -9,7 +9,8 @@ module ironvideo_reader #(
   parameter int MAX_BURST = 64,
   parameter int FIFO_AW = 9,
   parameter int ARQOS = 15,
-  parameter int AXI_ID_WIDTH = 1
+  parameter int AXI_ID_WIDTH = 1,
+  parameter bit SUPPORT_NV12 = 0
 ) (
   // Memory AXI clock and active-high synchronous reset.
   input  logic                    clk,
@@ -57,14 +58,21 @@ module ironvideo_reader #(
   output logic                    row_done,
   output logic                    resp_fault,
   output logic                    last_fault,
-  output logic [31:0]             fault_addr
+  output logic [31:0]             fault_addr,
+
+  // NV12 uses line_bytes luma bytes per row and the same number of UV bytes
+  // per pair of rows. The FIFO receives packed Y0,Cb,Y1,Cr byte order.
+  input  logic                    nv12,
+  input  logic [31:0]             uv_base,
+  input  logic [31:0]             uv_stride,
+  output logic                    row_extra_chroma
 );
   localparam int BEAT_BYTES = DATA_WIDTH / 8;
   localparam int BEAT_SHIFT = $clog2(BEAT_BYTES);
   localparam logic [12:0] PAGE_BYTES = 13'd4096;
 
   typedef enum logic [2:0] {
-    IDLE_ST, PLAN_ST, ADDRESS_ST, READ_ST, FAULT_ST
+    IDLE_ST, PLAN_ST, ADDRESS_ST, READ_ST, FAULT_ST, PACK_TAIL_ST
   } reader_state_t;
 
   reader_state_t state;
@@ -72,6 +80,9 @@ module ironvideo_reader #(
   logic [31:0] next_addr;
   logic [31:0] bytes_left;
   logic [15:0] line_index;
+  logic use_nv12;
+  logic reading_uv;
+  logic [31:0] uv_line_addr;
 
   logic [31:0] available_beats;
   logic [31:0] line_beats;
@@ -93,6 +104,8 @@ module ironvideo_reader #(
   logic matching_id;
   logic bad_response;
   logic bad_last;
+  logic pack_pending, pack_high, pack_write, pack_first, pack_frame, pack_last;
+  logic [DATA_WIDTH-1:0] pack_data;
 
   assign available_beats = 32'(fifo_free);
   assign line_beats = bytes_left >> BEAT_SHIFT;
@@ -116,22 +129,87 @@ module ironvideo_reader #(
   assign m_axi_arprot = 3'b000;
   assign m_axi_arqos = 4'(ARQOS);
   assign m_axi_arvalid = !rst && (state == ADDRESS_ST);
-  assign m_axi_rready = !rst && (state == READ_ST);
-  assign idle = !m_axi_arvalid && !m_axi_rready;
+  // A Y beat generates two FIFO words. Accept the next Y beat on the same
+  // edge that writes the upper word. A stopped/faulted burst drains freely.
+  assign m_axi_rready = !rst && state == READ_ST &&
+                        (!pack_pending || pack_high || !run || stop_requested || burst_faulted);
+  assign idle = rst || (state != ADDRESS_ST && state != READ_ST && !pack_pending);
 
   assign r_transfer = m_axi_rvalid && m_axi_rready;
   assign matching_id = (m_axi_rid == 0);
   assign bad_response = !matching_id || (m_axi_rresp != 2'b00);
   assign bad_last = matching_id && (m_axi_rlast != (beats_left == 9'd1));
   assign burst_faulted = reported_resp_fault || reported_last_fault;
-  assign fifo_write = r_transfer && run && !stop_requested && !burst_faulted && !bad_response && !bad_last;
-  assign fifo_data = m_axi_rdata;
-  assign fifo_sof = fifo_write && frame_start;
-  assign fifo_sol = fifo_write && line_start;
+  wire good_beat = r_transfer && run && !stop_requested && !burst_faulted && !bad_response && !bad_last;
+  wire plane_end = beats_left == 9'd1 && bytes_left == burst_bytes;
+  assign fifo_write = use_nv12 ? pack_write : good_beat;
+  assign fifo_data = use_nv12 ? pack_data : m_axi_rdata;
+  assign fifo_sof = fifo_write && (use_nv12 ? pack_first && pack_frame : frame_start);
+  assign fifo_sol = fifo_write && (use_nv12 ? pack_first : line_start);
+  assign row_extra_chroma = use_nv12 && !line_index[0];
+  wire [31:0] reserve_beats = use_nv12 ? line_beats << 1 : line_beats;
   wire launch = state == PLAN_ST && run && planned_beats != 0 &&
-                (row_busy || available_beats >= line_beats);
+                (row_busy || available_beats >= reserve_beats);
   assign row_start = launch && !row_busy;
-  assign row_done = fifo_write && (beats_left == 9'd1) && (bytes_left == burst_bytes);
+  assign row_done = fifo_write && (use_nv12 ? pack_high && pack_last : plane_end);
+
+  if (SUPPORT_NV12) begin : nv12_adapter
+    // A normalized row occupies twice the Y plane's bytes in the FIFO. The
+    // largest supported UV row therefore takes only half the FIFO's RAM depth.
+    localparam int UV_DEPTH = 1 << (FIFO_AW-1);
+    localparam int UV_AW = FIFO_AW > 1 ? FIFO_AW-1 : 1;
+    (* ram_style = "block" *) logic [DATA_WIDTH-1:0] chroma [0:UV_DEPTH-1];
+    logic [UV_AW-1:0] index_in_row;
+    logic [DATA_WIDTH-1:0] uv_word, y_word;
+    logic held_sol;
+    wire accept_uv = good_beat && use_nv12 && reading_uv;
+    wire accept_y = good_beat && use_nv12 && !reading_uv;
+    wire discard = !run || stop_requested || burst_faulted ||
+                   (r_transfer && (bad_response || bad_last));
+    wire [2*DATA_WIDTH-1:0] interleaved;
+    for (genvar i = 0; i < BEAT_BYTES; i++) begin : pack_byte
+      assign interleaved[16*i +: 16] = {uv_word[8*i +: 8], y_word[8*i +: 8]};
+    end
+    assign pack_data = pack_high ? interleaved[DATA_WIDTH +: DATA_WIDTH] : interleaved[0 +: DATA_WIDTH];
+    assign pack_first = !pack_high && held_sol;
+    assign pack_write = !rst && pack_pending && !discard;
+
+    // The cache is written once at the start of each two-row group and read
+    // synchronously on each good Y beat. No cache data crosses clock domains.
+    always_ff @(posedge clk) begin
+      if (accept_uv)
+        chroma[index_in_row] <= m_axi_rdata;
+      if (accept_y) begin
+        uv_word <= chroma[index_in_row];
+        y_word <= m_axi_rdata;
+      end
+    end
+    always_ff @(posedge clk) begin
+      if (rst || discard) begin
+        index_in_row <= '0;
+        pack_pending <= 1'b0;
+        pack_high <= 1'b0;
+        held_sol <= 1'b0;
+        pack_frame <= 1'b0;
+        pack_last <= 1'b0;
+      end else begin
+        if (accept_uv || accept_y)
+          index_in_row <= plane_end ? '0 : index_in_row + 1'b1;
+        if (accept_y) begin
+          pack_pending <= 1'b1;
+          pack_high <= 1'b0;
+          held_sol <= line_start;
+          pack_frame <= frame_start;
+          pack_last <= plane_end;
+        end else if (pack_pending) begin
+          pack_pending <= !pack_high;
+          pack_high <= !pack_high;
+        end
+      end
+    end
+  end else begin : packed_only
+    assign {pack_pending, pack_high, pack_write, pack_first, pack_frame, pack_last, pack_data} = '0;
+  end
 
   always_ff @(posedge clk) begin
     if (rst) begin
@@ -140,6 +218,9 @@ module ironvideo_reader #(
       next_addr <= '0;
       bytes_left <= '0;
       line_index <= '0;
+      use_nv12 <= 1'b0;
+      reading_uv <= 1'b0;
+      uv_line_addr <= '0;
       burst_beats <= '0;
       m_axi_araddr <= '0;
       m_axi_arlen <= '0;
@@ -161,7 +242,10 @@ module ironvideo_reader #(
         IDLE_ST: begin
           if (run) begin
             line_addr <= base;
-            next_addr <= base;
+            use_nv12 <= SUPPORT_NV12 && nv12;
+            reading_uv <= SUPPORT_NV12 && nv12;
+            uv_line_addr <= uv_base;
+            next_addr <= SUPPORT_NV12 && nv12 ? uv_base : base;
             bytes_left <= line_bytes;
             line_index <= '0;
             stop_requested <= 1'b0;
@@ -220,7 +304,7 @@ module ironvideo_reader #(
               frame_start <= 1'b0;
               // Drain through a matching RLAST even after the expected beat count expires.
               if (m_axi_rlast) begin
-                if (row_done || stop_requested || !run || burst_faulted || bad_response || bad_last)
+                if (stop_requested || !run || burst_faulted || bad_response || bad_last)
                   row_busy <= 1'b0;
                 if (stop_requested || !run) begin
                   state <= IDLE_ST;
@@ -231,21 +315,23 @@ module ironvideo_reader #(
                   if (bytes_left != burst_bytes) begin
                     next_addr <= next_addr + burst_bytes;
                     bytes_left <= bytes_left - burst_bytes;
-                  end else begin
+                  end else if (reading_uv) begin
+                    reading_uv <= 1'b0;
+                    next_addr <= line_addr;
                     bytes_left <= line_bytes;
-                    if (line_index == lines - 16'd1) begin
-                      line_addr <= base;
-                      next_addr <= base;
-                      line_index <= '0;
-                    end else begin
-                      line_addr <= line_addr + stride;
-                      next_addr <= line_addr + stride;
-                      line_index <= line_index + 16'd1;
-                    end
+                  end else if (use_nv12) begin
+                    state <= PACK_TAIL_ST;
                   end
                 end
               end
             end
+          end
+        end
+
+        PACK_TAIL_ST: begin
+          if (!run) begin
+            row_busy <= 1'b0;
+            state <= IDLE_ST;
           end
         end
 
@@ -256,6 +342,30 @@ module ironvideo_reader #(
 
         default: state <= FAULT_ST;
       endcase
+
+      // Packed rows finish on their final R beat, NV12 rows when the second
+      // word of that beat has actually been accepted by the FIFO.
+      if (row_done) begin
+        row_busy <= 1'b0;
+        bytes_left <= line_bytes;
+        state <= PLAN_ST;
+        if (line_index == lines - 16'd1) begin
+          line_index <= '0;
+          line_addr <= base;
+          reading_uv <= use_nv12;
+          uv_line_addr <= uv_base;
+          next_addr <= use_nv12 ? uv_base : base;
+        end else begin
+          line_index <= line_index + 16'd1;
+          line_addr <= line_addr + stride;
+          reading_uv <= use_nv12 && line_index[0];
+          if (use_nv12 && line_index[0]) begin
+            uv_line_addr <= uv_line_addr + uv_stride;
+            next_addr <= uv_line_addr + uv_stride;
+          end else
+            next_addr <= line_addr + stride;
+        end
+      end
     end
   end
 

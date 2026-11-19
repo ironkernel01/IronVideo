@@ -8,7 +8,9 @@ module ironvideo_top #(
   parameter integer FIFO_KIB = 16,
   parameter integer ARQOS = 15,
   parameter integer AXI_ID_WIDTH = 1,
-  parameter FAMILY = "7SERIES"
+  parameter FAMILY = "7SERIES",
+  // Bit 0 XRGB8888, bit 1 RGB565, bit 2 YUV422 (YUYV), bit 3 YUV420 (NV12).
+  parameter integer FORMAT_MASK = 1
 ) (
   (* X_INTERFACE_INFO = "xilinx.com:signal:clock:1.0 axi_clk CLK", X_INTERFACE_PARAMETER = "ASSOCIATED_BUSIF S_AXI:M_AXI, ASSOCIATED_RESET reset_n" *)
   input wire axi_clk,
@@ -108,7 +110,7 @@ module ironvideo_top #(
 
   ironvideo_hdmi_7series #(
     .DATA_WIDTH(DATA_WIDTH), .MAX_BURST(MAX_BURST), .FIFO_KIB(FIFO_KIB),
-    .ARQOS(ARQOS), .AXI_ID_WIDTH(AXI_ID_WIDTH)
+    .ARQOS(ARQOS), .AXI_ID_WIDTH(AXI_ID_WIDTH), .FORMAT_MASK(FORMAT_MASK)
   ) video (
     .axi_clk(axi_clk),
     .pixel_clk(pixel_clk),

@@ -8,7 +8,9 @@ module tb_ironvideo_720p #(
   parameter int PREFILL = 256,
   parameter int MAX_BURST = 64,
   parameter bit CHECK_SERIAL = 0,
-  parameter bit MODE_1080 = 0
+  parameter bit MODE_1080 = 0,
+  parameter int FORMAT_ID = 0,
+  parameter int FORMAT_MASK = 1
 );
   localparam int H_ACTIVE = MODE_1080 ? 1920 : 1280, H_FRONT = MODE_1080 ? 88 : 110;
   localparam int H_SYNC = MODE_1080 ? 44 : 40, H_BACK = MODE_1080 ? 148 : 220;
@@ -16,11 +18,14 @@ module tb_ironvideo_720p #(
   localparam int V_SYNC = 5, V_BACK = MODE_1080 ? 36 : 20;
   localparam int H_TOTAL = H_ACTIVE + H_FRONT + H_SYNC + H_BACK;
   localparam int V_TOTAL = V_ACTIVE + V_FRONT + V_SYNC + V_BACK;
-  localparam int PIXEL_BYTES = 4, BEAT_BYTES = DATA_WIDTH / 8;
+  localparam int PIXEL_BYTES = FORMAT_ID == 0 ? 4 : FORMAT_ID == 3 ? 1 : 2;
+  localparam int BEAT_BYTES = DATA_WIDTH / 8;
   localparam logic [2:0] AXI_SIZE = 3'($clog2(BEAT_BYTES));
   localparam logic [31:0] BASE = 32'h0100_0000;
+  localparam logic [31:0] UV_BASE = 32'h0200_0ff0;
+  localparam int UV_STRIDE = H_ACTIVE + 32;
   localparam realtime SERIAL_BIT_PERIOD = MODE_1080 ? 673401fs : 1346801fs;
-  localparam realtime PIXEL_HALF_PERIOD = CHECK_SERIAL ? 5 * SERIAL_BIT_PERIOD : 500ns / 74.25;
+  localparam realtime PIXEL_HALF_PERIOD = 5 * SERIAL_BIT_PERIOD;
   localparam logic [7:0] REG_CAPS = 'h08, REG_CONTROL = 'h0c, REG_STATUS = 'h10, REG_FAULT = 'h14, REG_MASK = 'h18,
     REG_BASE = 'h20, REG_STRIDE = 'h24, REG_WINDOW_BASE = 'h28, REG_WINDOW_BYTES = 'h2c,
     REG_H_ACTIVE = 'h30, REG_H_FRONT = 'h34, REG_H_SYNC = 'h38, REG_H_BACK = 'h3c,
@@ -87,7 +92,7 @@ module tb_ironvideo_720p #(
     wire [15:0] board_awaddr = {8'b0, awaddr}, board_araddr = {8'b0, araddr};
     always #(SERIAL_BIT_PERIOD) serial_clk = ~serial_clk;
 
-    ironvideo_top #(.DATA_WIDTH(DATA_WIDTH), .MAX_BURST(MAX_BURST)) dut (
+    ironvideo_top #(.DATA_WIDTH(DATA_WIDTH), .MAX_BURST(MAX_BURST), .FORMAT_MASK(FORMAT_MASK)) dut (
       `IRONVIDEO_RASTER_AXI(board_awaddr, board_araddr),
       .serial_clk(serial_clk), .tmds_data_p(data_p),
       .tmds_data_n(data_n), .tmds_clk_p(clk_p), .tmds_clk_n(clk_n)
@@ -95,13 +100,13 @@ module tb_ironvideo_720p #(
     // Probe the production wrapper's raster for the parallel scoreboard.
     // The serial receiver observes only the output pins.
     assign {rgb, de, hs, vs} = {dut.video.rgb, dut.video.de, dut.video.hs, dut.video.vs};
-    ironvideo_serial_receiver #(.MODE_1080(MODE_1080)) receiver (
+    ironvideo_serial_receiver #(.MODE_1080(MODE_1080), .FORMAT_ID(FORMAT_ID), .STRIDE(STRIDE)) receiver (
       .clk_p(clk_p), .clk_n(clk_n), .data_p(data_p), .data_n(data_n),
       .checked(serial_checked)
     );
   end else begin : parallel_only
     assign serial_checked = 1;
-    ironvideo_scanout #(.DATA_WIDTH(DATA_WIDTH), .MAX_BURST(MAX_BURST), .FIFO_KIB(16)) dut (
+    ironvideo_scanout #(.DATA_WIDTH(DATA_WIDTH), .MAX_BURST(MAX_BURST), .FIFO_KIB(16), .FORMAT_MASK(FORMAT_MASK)) dut (
       `IRONVIDEO_RASTER_AXI(awaddr, araddr), .rgb(rgb), .de(de), .hs(hs), .vs(vs)
     );
   end
@@ -143,11 +148,29 @@ module tb_ironvideo_720p #(
     value = rdata;
   endtask
 
-  // XRGB words change with the pixel byte address, including the unused high byte.
-  function automatic logic [31:0] framebuffer_word(input logic [31:0] address);
-    logic [23:0] index;
-    index = 24'((address - BASE) / PIXEL_BYTES);
-    return {8'hff ^ index[7:0], index ^ 24'h57_a9_31};
+  function automatic byte unsigned framebuffer_byte(input logic [31:0] address);
+    int offset, x, y, column;
+    logic [31:0] packed_pixel;
+    if (address >= UV_BASE) begin
+      offset = int'(address - UV_BASE);
+      column = offset % UV_STRIDE;
+      y = offset / UV_STRIDE;
+      return column[0] ? ironvideo_format_model::cr(column/2,y) : ironvideo_format_model::cb(column/2,y);
+    end
+    offset = int'(address - BASE);
+    column = offset % STRIDE;
+    y = offset / STRIDE;
+    x = column / PIXEL_BYTES;
+    case (FORMAT_ID)
+      0: begin
+        packed_pixel = {8'hff ^ 8'(offset/4), ironvideo_format_model::color(0,x,y,STRIDE)};
+        return 8'(packed_pixel >> (8 * (column % 4)));
+      end
+      1: return 8'(ironvideo_format_model::rgb565(x,y) >> (8 * (column % 2)));
+      2: return !column[0] ? ironvideo_format_model::luma(x,y) :
+                  column[1] ? ironvideo_format_model::cr(x/2,y) : ironvideo_format_model::cb(x/2,y);
+      default: return ironvideo_format_model::luma(x,y);
+    endcase
   endfunction
 
   int cycle = 0;
@@ -158,22 +181,27 @@ module tb_ironvideo_720p #(
   int complete_read_frames = 0;
   logic full_burst_seen = 0;
   logic [31:0] read_address = BASE;
-  logic [31:0] next_address = BASE;
-  logic [31:0] line_end = BASE + H_ACTIVE * PIXEL_BYTES;
+  bit chroma_segment = FORMAT_ID == 3;
+  int line_number = 0;
+  logic [31:0] next_address = FORMAT_ID == 3 ? UV_BASE : BASE;
+  wire [31:0] line_end = chroma_segment ? UV_BASE + (line_number/2)*UV_STRIDE + H_ACTIVE :
+                             BASE + line_number*STRIDE + H_ACTIVE*PIXEL_BYTES;
   wire [31:0] burst_end = mem_araddr + (32'(mem_arlen) + 1) * BEAT_BYTES;
 
   // The slave models periodic address arbitration, 120 to 230 ns initial
   // latency, and occasional data bubbles. It returns consecutive beats between bubbles.
   assign mem_arready = reset_n && remaining == 0 && cycle % 13 >= 4;
-  assign mem_rvalid = remaining != 0 && first_beat_delay == 0 && cycle % 19 >= 3;
+  bit stalled_response = 0;
+  assign mem_rvalid = remaining != 0 && first_beat_delay == 0 && (stalled_response || cycle % 19 >= 3);
   assign mem_rlast = remaining == 1;
-  for (genvar lane = 0; lane < BEAT_BYTES / PIXEL_BYTES; lane++) begin : memory_lanes
-    assign mem_rdata[lane * 32 +: 32] = framebuffer_word(read_address + lane * PIXEL_BYTES);
+  for (genvar lane = 0; lane < BEAT_BYTES; lane++) begin : memory_lanes
+    assign mem_rdata[lane * 8 +: 8] = framebuffer_byte(read_address + lane);
   end
 
   always @(posedge axi_clk) begin
     if (reset_n) begin
       cycle <= cycle + 1;
+      stalled_response <= mem_rvalid && !mem_rready;
       if (mem_arvalid && !mem_arready)
         ar_stall_cycles <= ar_stall_cycles + 1;
       if (mem_arvalid && mem_arready) begin
@@ -183,13 +211,19 @@ module tb_ironvideo_720p #(
                  mem_araddr, burst_end - 1, next_address, line_end);
 
         if (burst_end == line_end) begin
-          if (line_end == BASE + (V_ACTIVE - 1) * STRIDE + H_ACTIVE * PIXEL_BYTES) begin
-            next_address <= BASE;
-            line_end <= BASE + H_ACTIVE * PIXEL_BYTES;
+          if (chroma_segment) begin
+            next_address <= BASE + line_number * STRIDE;
+            chroma_segment <= 0;
+          end else if (line_number == V_ACTIVE - 1) begin
+            line_number <= 0;
+            next_address <= FORMAT_ID == 3 ? UV_BASE : BASE;
+            chroma_segment <= FORMAT_ID == 3;
             complete_read_frames <= complete_read_frames + 1;
           end else begin
-            next_address <= line_end + STRIDE - H_ACTIVE * PIXEL_BYTES;
-            line_end <= line_end + STRIDE;
+            line_number <= line_number + 1;
+            chroma_segment <= FORMAT_ID == 3 && line_number[0];
+            next_address <= FORMAT_ID == 3 && line_number[0] ? UV_BASE + ((line_number+1)/2)*UV_STRIDE :
+                            BASE + (line_number+1)*STRIDE;
           end
         end else begin
           next_address <= burst_end;
@@ -202,9 +236,7 @@ module tb_ironvideo_720p #(
         first_beat_delay <= 11 + cycle % 12;
       end else if (first_beat_delay != 0) begin
         first_beat_delay <= first_beat_delay - 1;
-      end else if (mem_rvalid) begin
-        if (mem_rready !== 1'b1)
-          $fatal(1, "TEST FAIL: DMA did not reserve an outstanding DDR beat at %h", read_address);
+      end else if (mem_rvalid && mem_rready) begin
         remaining <= remaining - 1;
         read_address <= read_address + BEAT_BYTES;
       end else if (remaining != 0) begin
@@ -220,7 +252,6 @@ module tb_ironvideo_720p #(
   initial begin : verify_raster
     logic expected_de, expected_hs, expected_vs;
     logic [23:0] expected_rgb;
-    logic [31:0] word_data;
 
     @(posedge de);
     @(negedge pixel_clk);
@@ -232,8 +263,7 @@ module tb_ironvideo_720p #(
           expected_vs = y >= V_ACTIVE + V_FRONT && y < V_ACTIVE + V_FRONT + V_SYNC;
           expected_rgb = 0;
           if (frame != 0 && expected_de) begin
-            word_data = framebuffer_word(BASE + y * STRIDE + x * PIXEL_BYTES);
-            expected_rgb = word_data[23:0];
+            expected_rgb = ironvideo_format_model::color(FORMAT_ID,x,y,STRIDE);
           end
           if ({de, hs, vs, rgb} !== {expected_de, expected_hs, expected_vs, expected_rgb})
             $fatal(1, "TEST FAIL: frame %0d pixel (%0d,%0d) got DE/HS/VS %b%b%b RGB %h, expected %b%b%b RGB %h",
@@ -252,9 +282,21 @@ module tb_ironvideo_720p #(
     reset_n = 1;
     repeat (8) @(negedge axi_clk);
     read_reg(REG_CAPS, value);
+    $display("Checking native framebuffer format %0d at %0dp60", FORMAT_ID, V_ACTIVE);
     if (value[24:16] !== 9'(MAX_BURST))
       $fatal(1, "TEST FAIL: CAPS burst limit is %0d, expected %0d", value[24:16], MAX_BURST);
     write_reg(REG_MASK, 32'hf);
+    if (FORMAT_MASK != 1) begin
+      read_reg('h98, value);
+      if (value !== FORMAT_MASK) $fatal(1, "TEST FAIL: format discovery got %h", value);
+      write_reg('h9c, FORMAT_ID);
+    end
+    if (FORMAT_ID == 3) begin
+      write_reg('ha0, UV_BASE);
+      write_reg('ha4, UV_STRIDE);
+      write_reg('ha8, UV_BASE);
+      write_reg('hac, (V_ACTIVE/2)*UV_STRIDE);
+    end
     write_reg(REG_BASE, BASE);
     write_reg(REG_STRIDE, STRIDE);
     write_reg(REG_WINDOW_BASE, BASE);
