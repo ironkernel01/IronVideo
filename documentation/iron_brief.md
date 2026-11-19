@@ -17,7 +17,7 @@ IronVideo turns a framebuffer in DDR into a continuous progressive video stream.
 | `ironvideo_top` | Three TMDS data pairs and one forwarded differential clock pair | AMD 7-series designs with a TMDS-capable output bank and an HDMI connector |
 | Shared C driver | Bare-metal scanout, U-Boot and Linux DRM/KMS | Embedded consoles, simple graphics applications and bring-up diagnostics |
 
-The included transmitter carries DVI-compatible video over the HDMI connector. The board supplies DDR, clock generation, reset and connector pin constraints. The three software environments share format discovery, memory validation and the register programming sequence.
+The transmitter carries DVI-compatible video over HDMI. The board supplies DDR, clocks, reset and pin constraints. With the optional clock selector, software can switch between two board-supplied pixel and serializer clock pairs in one FPGA image. Each pair must meet the target device's clock limits for qualified operation.
 
 </div>
 <div class="brief-page">

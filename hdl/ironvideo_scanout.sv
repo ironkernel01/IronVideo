@@ -9,12 +9,15 @@ module ironvideo_scanout #(
   parameter int FIFO_KIB = 16,
   parameter int ARQOS = 15,
   parameter int AXI_ID_WIDTH = 1,
-  parameter int FORMAT_MASK = 1
+  parameter int FORMAT_MASK = 1,
+  parameter bit CLOCK_SELECT = 0
 ) (
   // Independent bus and pixel clocks, plus the shared active-low reset.
   input logic axi_clk,
   input logic pixel_clk,
   input logic reset_n,
+  output logic clock_request,
+  input logic clock_active, clock_ready,
 
   // AXI4-Lite control and diagnostics, clocked by axi_clk.
   input logic [7:0] s_axi_awaddr,
@@ -89,7 +92,7 @@ module ironvideo_scanout #(
     REG_ROW_BEST = 'h88, REG_READ_BEATS = 'h8c, REG_READ_BURSTS = 'h90,
     REG_READ_ERRORS = 'h94, REG_FORMAT_CAPS = 'h98, REG_FORMAT = 'h9c,
     REG_UV_BASE = 'ha0, REG_UV_STRIDE = 'ha4, REG_UV_WINDOW = 'ha8, REG_UV_SIZE = 'hac,
-    REG_PEAK_RATE_CYCLES = 'hb0, REG_PEAK_RATE_BYTES = 'hb4;
+    REG_PEAK_RATE_CYCLES = 'hb0, REG_PEAK_RATE_BYTES = 'hb4, REG_CLOCK_SELECT = 'hb8;
   typedef enum logic [1:0] {S_IDLE, S_DRAIN, S_APPLY} config_state_t;
 
   logic axi_rst;
@@ -209,6 +212,7 @@ module ironvideo_scanout #(
                   && (!nv12_shadow || (uv_valid && !shadow.va[0]));
   wire valid_mode = valid_timing && (write_data[1] || valid_frame);
   wire bad_control = control && ((commit && !valid_mode)
+            || (CLOCK_SELECT && (commit || write_data[0]) && !clock_ready)
             || (busy && (commit || write_data[0] != target_enable))
             || (snapshot_request && snapshot_busy)
             || (write_data[0] && !commit && !configured));
@@ -256,12 +260,12 @@ module ironvideo_scanout #(
   logic [31:0] merged_value;
   logic read_known;
   logic write_allowed;
-  logic [31:0] register_value [0:REG_PEAK_RATE_BYTES/4];
+  logic [31:0] register_value [0:REG_CLOCK_SELECT/4];
 
   always_comb begin
     register_value[REG_ID / 4] = 32'h49525644;
     register_value[REG_VERSION / 4] = EXTENDED_ABI ? 32'h00010002 : 32'h00010001;
-    register_value[REG_CAPS / 4] = {7'b0, 9'(MAX_BURST), 8'(FIFO_AW), 8'(DATA_WIDTH)};
+    register_value[REG_CAPS / 4] = {6'b0, CLOCK_SELECT, 9'(MAX_BURST), 8'(FIFO_AW), 8'(DATA_WIDTH)};
     register_value[REG_CONTROL / 4] = {30'b0, shadow.pattern, target_enable};
     register_value[REG_STATUS / 4] = {26'b0, target_enable, snapshot_busy,
                      quiet, applied_enable, busy, configured};
@@ -308,13 +312,15 @@ module ironvideo_scanout #(
     register_value[REG_UV_SIZE / 4] = uv_size;
     register_value[REG_PEAK_RATE_CYCLES / 4] = peak_rate_cycles;
     register_value[REG_PEAK_RATE_BYTES / 4] = peak_rate_bytes;
+    register_value[REG_CLOCK_SELECT / 4] = {29'b0,clock_ready,clock_active,clock_request};
 
-    read_known = s_axi_araddr <= (EXTENDED_ABI ? REG_PEAK_RATE_BYTES : REG_READ_ERRORS)
-              && s_axi_araddr[1:0] == 0;
+    read_known = (s_axi_araddr <= (EXTENDED_ABI ? REG_PEAK_RATE_BYTES : REG_READ_ERRORS)
+              && s_axi_araddr[1:0] == 0) || (CLOCK_SELECT && s_axi_araddr == REG_CLOCK_SELECT);
     read_value = read_known ? register_value[s_axi_araddr[7:2]] : '0;
     write_allowed = write_addr == REG_CONTROL || write_addr == REG_FAULT
             || write_addr == REG_MASK
-            || shadow_write_addr;
+            || shadow_write_addr
+            || (CLOCK_SELECT && write_addr == REG_CLOCK_SELECT && quiet && !snapshot_busy && clock_ready);
     old_write_value = write_allowed ? register_value[write_addr[7:2]] : '0;
     merged_value = merge_bytes(old_write_value, write_data, write_strobes);
   end
@@ -343,6 +349,7 @@ module ironvideo_scanout #(
       s_axi_rresp <= OKAY;
       read_response_valid <= 1'b0;
       shadow <= '0;
+      clock_request <= 1'b0;
       window_base <= '0;
       window_bytes <= '0;
       uv_base <= '0;
@@ -433,6 +440,7 @@ module ironvideo_scanout #(
         s_axi_bresp <= write_allowed && !bad_control ? OKAY : SLVERR;
         if (write_allowed && !bad_control) begin
           case (write_addr)
+            REG_CLOCK_SELECT: if (low_byte) clock_request <= write_data[0];
             REG_CONTROL: if (low_byte) begin
               shadow.pattern <= write_data[1];
               if (snapshot_request)

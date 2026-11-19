@@ -48,6 +48,10 @@
 #define IV_REG_UV_SIZE		0xac
 #define IV_REG_PEAK_RATE_CYCLES	0xb0
 #define IV_REG_PEAK_RATE_BYTES	0xb4
+#define IV_REG_CLOCK_SELECT	0xb8
+#define IV_CLOCK_REQUEST	(1U << 0)
+#define IV_CLOCK_ACTIVE		(1U << 1)
+#define IV_CLOCK_READY		(1U << 2)
 
 #define IV_ID			0x49525644
 #define IV_VERSION_LEGACY	0x00010001
@@ -56,6 +60,7 @@
 #define IV_CAP_WIDTH_MASK	0x000000ff
 #define IV_CAP_FIFO_AW_MASK	0x0000ff00
 #define IV_CAP_BURST_MASK	0x01ff0000
+#define IV_CAP_CLOCK_SELECT	(1U << 25)
 
 #define IV_CTL_ENABLE		(1U << 0)
 #define IV_CTL_PATTERN		(1U << 1)

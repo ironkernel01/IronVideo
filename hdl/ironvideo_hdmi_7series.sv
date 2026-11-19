@@ -7,12 +7,14 @@ module ironvideo_hdmi_7series #(
   parameter int FIFO_KIB = 16,
   parameter int ARQOS = 15,
   parameter int AXI_ID_WIDTH = 1,
-  parameter int FORMAT_MASK = 1
+  parameter int FORMAT_MASK = 1,
+  parameter bit CLOCK_SELECT = 0
 ) (
   // Independent AXI clock, phase-related pixel and 5x serial clocks, and active-low reset.
   input logic axi_clk,
   input logic pixel_clk,
   input logic serial_clk,
+  input logic pixel_clk_alt, serial_clk_alt,
   input logic reset_n,
 
   // AXI4-Lite control and diagnostics, clocked by axi_clk.
@@ -67,12 +69,50 @@ module ironvideo_hdmi_7series #(
   wire de;
   wire hs;
   wire vs;
+  wire selected_pixel, selected_serial, clock_request, clock_active, clock_ready;
+  if (CLOCK_SELECT) begin : clock_mux
+    logic select_reg;
+    logic [4:0] settle;
+    // Both input pairs run continuously. Hold the serializer in reset while
+    // the two glitchless muxes independently transfer to their new inputs.
+    BUFGMUX_CTRL pixel_mux (.I0(pixel_clk), .I1(pixel_clk_alt), .S(select_reg), .O(selected_pixel));
+    BUFGMUX_CTRL serial_mux (.I0(serial_clk), .I1(serial_clk_alt), .S(select_reg), .O(selected_serial));
+    wire pixel_reset, serial_reset;
+    wire clocks_settled = reset_n && select_reg == clock_request && settle == 0;
+    ironvideo_reset pixel_edges (.clk(selected_pixel), .reset_n(clocks_settled), .rst(pixel_reset));
+    ironvideo_reset serial_edges (.clk(selected_serial), .reset_n(clocks_settled), .rst(serial_reset));
+    (* ASYNC_REG = "TRUE" *) logic [2:0] pixel_ok, serial_ok;
+    always_ff @(posedge axi_clk or negedge reset_n) begin
+      if (!reset_n) begin
+        select_reg <= 0;
+        settle <= '1;
+        pixel_ok <= 0;
+        serial_ok <= 0;
+      end else begin
+        pixel_ok <= {pixel_ok[1:0], !pixel_reset};
+        serial_ok <= {serial_ok[1:0], !serial_reset};
+        if (select_reg != clock_request) begin
+          select_reg <= clock_request;
+          settle <= '1;
+        end else if (settle != 0)
+          settle <= settle - 1'b1;
+      end
+    end
+    assign clock_active = select_reg;
+    assign clock_ready = clocks_settled && pixel_ok[2] && serial_ok[2];
+  end else begin : fixed_clock
+    assign selected_pixel = pixel_clk;
+    assign selected_serial = serial_clk;
+    assign clock_active = 0;
+    assign clock_ready = 1;
+  end
 
   ironvideo_scanout #(
     .DATA_WIDTH(DATA_WIDTH), .MAX_BURST(MAX_BURST), .FIFO_KIB(FIFO_KIB),
-    .ARQOS(ARQOS), .AXI_ID_WIDTH(AXI_ID_WIDTH), .FORMAT_MASK(FORMAT_MASK)
+    .ARQOS(ARQOS), .AXI_ID_WIDTH(AXI_ID_WIDTH), .FORMAT_MASK(FORMAT_MASK), .CLOCK_SELECT(CLOCK_SELECT)
   ) scanout (
-    .axi_clk(axi_clk), .pixel_clk(pixel_clk), .reset_n(reset_n),
+    .axi_clk(axi_clk), .pixel_clk(selected_pixel), .reset_n(reset_n),
+    .clock_request(clock_request), .clock_active(clock_active), .clock_ready(clock_ready),
     .s_axi_awaddr(s_axi_awaddr), .s_axi_awprot(s_axi_awprot),
     .s_axi_awvalid(s_axi_awvalid), .s_axi_awready(s_axi_awready),
     .s_axi_wdata(s_axi_wdata), .s_axi_wstrb(s_axi_wstrb),
@@ -92,7 +132,7 @@ module ironvideo_hdmi_7series #(
   );
 
   ironvideo_tmds_7series backend (
-    .pixel_clk(pixel_clk), .serial_clk(serial_clk), .reset_n(reset_n),
+    .pixel_clk(selected_pixel), .serial_clk(selected_serial), .reset_n(reset_n && clock_ready),
     .rgb(rgb), .de(de), .hs(hs), .vs(vs),
     .tmds_data_p(tmds_data_p), .tmds_data_n(tmds_data_n),
     .tmds_clk_p(tmds_clk_p), .tmds_clk_n(tmds_clk_n)

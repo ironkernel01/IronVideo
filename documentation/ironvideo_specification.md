@@ -258,6 +258,19 @@ The VERSION register identifies the interface before software reads any extensio
 | `0xac` | UV_SIZE | RW shadow | Size of the UV aperture in bytes. |
 | `0xb0` | PEAK_RATE_CYCLES | RO, clear on read | Pixel ticks for the completed row with greatest bytes per tick. Read first to close the interval and latch the associated byte count. |
 | `0xb4` | PEAK_RATE_BYTES | RO | Latched byte count corresponding to the last PEAK_RATE_CYCLES read. |
+| `0xb8` | CLOCK_SELECT | RW/RO | Optional when CAPS bit 25 is set. Write bit 0 to request clock pair 0 or 1. Read bit 0 for the request, bit 1 for the selected pair and bit 2 for ready. |
+
+With `CLOCK_SELECT=1` the 7-series top accepts two constantly running,
+phase-related pairs from the board MMCM. Each pair has one pixel clock and
+one serializer clock at five times its frequency. Pair 0 uses `pixel_clk`
+and `serial_clk`; pair 1 uses `pixel_clk_alt` and `serial_clk_alt`. The
+two BUFGMUX_CTRL primitives sit inside IronVideo. Stop scanout and wait for
+QUIESCED with no snapshot in progress before writing CLOCK_SELECT. The
+register slave rejects changes during active scanout. The serializer stays
+in reset through the switch. Ready includes feedback from both clock
+domains. After it reads 4 for pair 0 or 7 for pair 1, program the new timing
+and restart scanout. Fixed-clock integrations retain the original interface
+behavior with `CLOCK_SELECT=0`.
 
 Each active memory plane needs a beat-aligned base, stride and active row size. For YUV420, both dimensions are even. Validate the exclusive end of the UV aperture independently, using H/2 chroma rows. UV and Y may have different strides and may occupy separate allocations. Other formats use the primary aperture alone. Packed YUV422 requires complete pixel pairs.
 

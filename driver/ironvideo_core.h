@@ -39,7 +39,7 @@ struct iv_mmio {
 };
 
 struct iv_caps {
-	iv_u32 version, format_mask, beat_bytes, burst_beats, fifo_bytes;
+	iv_u32 version, format_mask, beat_bytes, burst_beats, fifo_bytes, clock_select;
 };
 
 struct iv_mode {
@@ -81,6 +81,7 @@ static inline int iv_discover(const struct iv_mmio *io, struct iv_caps *caps)
 	    caps->version != IV_VERSION_FORMATS)
 		return IV_UNSUPPORTED;
 	value = io->read32(io->context, IV_REG_CAPS);
+	caps->clock_select = !!(value & IV_CAP_CLOCK_SELECT);
 	bits = value & IV_CAP_WIDTH_MASK;
 	shift = (value & IV_CAP_FIFO_AW_MASK) >> 8;
 	caps->burst_beats = (value & IV_CAP_BURST_MASK) >> 16;
@@ -218,13 +219,13 @@ static inline int iv_validate(const struct iv_caps *caps,
 	return IV_OK;
 }
 
-static inline int iv_wait(const struct iv_mmio *io, iv_u32 mask,
-			  iv_u32 expected, iv_u32 poll_budget)
+static inline int iv_wait_register(const struct iv_mmio *io, iv_u32 reg,
+				   iv_u32 mask, iv_u32 expected, iv_u32 poll_budget)
 {
 	iv_u64 start = io->time_us ? io->time_us(io->context) : 0;
 
 	while (poll_budget--) {
-		if ((io->read32(io->context, IV_REG_STATUS) & mask) == expected)
+		if ((io->read32(io->context, reg) & mask) == expected)
 			return IV_OK;
 		if (io->time_us && io->time_us(io->context) - start >= io->timeout_us)
 			break;
@@ -232,6 +233,37 @@ static inline int iv_wait(const struct iv_mmio *io, iv_u32 mask,
 			io->poll_delay(io->context);
 	}
 	return IV_TIMEOUT;
+}
+
+static inline int iv_wait(const struct iv_mmio *io, iv_u32 mask,
+			  iv_u32 expected, iv_u32 poll_budget)
+{
+	return iv_wait_register(io, IV_REG_STATUS, mask, expected, poll_budget);
+}
+
+/* The caller owns the modeset and has drained scanout with iv_stop(). */
+static inline int iv_select_clock(const struct iv_mmio *io, iv_u32 source, iv_u32 budget)
+{
+	iv_u32 expected = IV_CLOCK_READY;
+	int ret;
+
+	if (source > 1)
+		return IV_INVALID;
+	if (!(io->read32(io->context, IV_REG_CAPS) & IV_CAP_CLOCK_SELECT))
+		return source ? IV_UNSUPPORTED : IV_OK;
+	if (!(io->read32(io->context, IV_REG_STATUS) & IV_ST_QUIESCED))
+		return IV_INVALID;
+	ret = iv_wait(io, IV_ST_SNAPSHOT_BUSY | IV_ST_BUSY, 0, budget);
+	if (!ret)
+		ret = iv_wait_register(io, IV_REG_CLOCK_SELECT, IV_CLOCK_READY, IV_CLOCK_READY, budget);
+	if (ret)
+		return ret;
+	if (source)
+		expected |= IV_CLOCK_REQUEST | IV_CLOCK_ACTIVE;
+	io->write32(io->context, IV_REG_CLOCK_SELECT, source);
+	return iv_wait_register(io, IV_REG_CLOCK_SELECT,
+				IV_CLOCK_REQUEST | IV_CLOCK_ACTIVE | IV_CLOCK_READY,
+				expected, budget);
 }
 
 static inline int iv_stop(const struct iv_mmio *io, iv_u32 poll_budget)

@@ -256,8 +256,8 @@ int ironvideo_boot_scanout(u8 __iomem *regs, u32 fb, u32 size, u32 stride,
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/sysfs.h>
+#include <video/display_timing.h>
 #include <video/of_display_timing.h>
-#include <video/of_videomode.h>
 #include <video/videomode.h>
 
 #include <drm/clients/drm_client_setup.h>
@@ -272,6 +272,7 @@ int ironvideo_boot_scanout(u8 __iomem *regs, u32 fb, u32 size, u32 stride,
 #include <drm/drm_gem_atomic_helper.h>
 #include <drm/drm_gem_dma_helper.h>
 #include <drm/drm_gem_framebuffer_helper.h>
+#include <drm/drm_managed.h>
 #include <drm/drm_print.h>
 #include <drm/drm_probe_helper.h>
 
@@ -283,11 +284,12 @@ struct ironvideo {
 	struct drm_crtc crtc;
 	struct drm_encoder encoder;
 	struct drm_connector connector;
-	struct drm_display_mode native_mode;
+	struct drm_display_mode *modes;
+	unsigned int mode_count;
 
 	void __iomem *regs;
-	struct clk_bulk_data clocks[2];
-	unsigned long pixel_hz;
+	struct clk_bulk_data clocks[3];
+	unsigned long pixel_hz[2];
 	unsigned long axi_hz;
 	struct iv_mmio io;
 	struct iv_caps caps;
@@ -364,10 +366,22 @@ static const u32 ironvideo_fourcc[] = {
 	[IV_FORMAT_YUV420] = DRM_FORMAT_NV12,
 };
 
+static int ironvideo_clock_source(const struct ironvideo *iv, int clock_khz)
+{
+	if (clock_khz <= 0)
+		return -EINVAL;
+	if (clock_khz == iv->pixel_hz[0] / 1000)
+		return 0;
+	if (iv->caps.clock_select && clock_khz == iv->pixel_hz[1] / 1000)
+		return 1;
+	return -EINVAL;
+}
+
 static bool ironvideo_bandwidth(const struct ironvideo *iv,
 				const struct drm_display_mode *mode,
 				enum iv_format format,
-				const struct iv_geometry *geometry)
+				const struct iv_geometry *geometry,
+				unsigned long pixel_hz)
 {
 	u64 total_pixels = (u64)mode->htotal * mode->vtotal;
 	u64 frame_bytes = geometry->frame_bytes;
@@ -378,7 +392,7 @@ static bool ironvideo_bandwidth(const struct ironvideo *iv,
 		frame_bytes *= IV_NV12_AXI_CYCLES;
 		rate *= IV_NV12_SOURCE_BEATS;
 	}
-	return mul_u64_u64_div_u64_roundup(frame_bytes, iv->pixel_hz,
+	return mul_u64_u64_div_u64_roundup(frame_bytes, pixel_hz,
 					  total_pixels) <= rate;
 }
 
@@ -388,8 +402,10 @@ static enum drm_mode_status ironvideo_mode_valid(struct drm_crtc *crtc,
 	struct ironvideo *iv = to_ironvideo(crtc->dev);
 	struct iv_geometry geometry;
 	enum iv_format format;
+	unsigned long pixel_hz;
 	u64 total_pixels;
 	bool geometry_valid = false;
+	int source;
 
 	if (mode->flags & DRM_MODE_FLAG_INTERLACE)
 		return MODE_NO_INTERLACE;
@@ -401,8 +417,10 @@ static enum drm_mode_status ironvideo_mode_valid(struct drm_crtc *crtc,
 					      DRM_MODE_FLAG_NVSYNC |
 					      DRM_MODE_FLAG_PIC_AR_MASK))
 		return MODE_BAD;
-	if (mode->clock <= 0 || (u64)mode->clock != (iv->pixel_hz / 1000))
+	source = ironvideo_clock_source(iv, mode->clock);
+	if (source < 0)
 		return MODE_CLOCK_RANGE;
+	pixel_hz = iv->pixel_hz[source];
 	if ((mode->flags & (DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_NHSYNC)) ==
 	    (DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_NHSYNC) ||
 	    (mode->flags & (DRM_MODE_FLAG_PVSYNC | DRM_MODE_FLAG_NVSYNC)) ==
@@ -418,7 +436,7 @@ static enum drm_mode_status ironvideo_mode_valid(struct drm_crtc *crtc,
 	total_pixels = (u64)mode->htotal * mode->vtotal;
 	/* Stop can take one complete frame plus the AXI drain handshake. */
 	if (total_pixels * USEC_PER_SEC >
-	    (u64)iv->pixel_hz * (IV_TIMEOUT_US - IV_DRAIN_MARGIN_US))
+	    (u64)pixel_hz * (IV_TIMEOUT_US - IV_DRAIN_MARGIN_US))
 		return MODE_BAD;
 
 	/* A connector mode can be offered if at least one advertised format fits. */
@@ -426,7 +444,7 @@ static enum drm_mode_status ironvideo_mode_valid(struct drm_crtc *crtc,
 		if (!iv_format_geometry(&iv->caps, format, mode->hdisplay,
 					 mode->vdisplay, &geometry)) {
 			geometry_valid = true;
-			if (ironvideo_bandwidth(iv, mode, format, &geometry))
+			if (ironvideo_bandwidth(iv, mode, format, &geometry, pixel_hz))
 				return MODE_OK;
 		}
 	}
@@ -459,7 +477,13 @@ static int ironvideo_fb_config(struct ironvideo *iv, const struct drm_display_mo
 {
 	struct iv_geometry geometry;
 	enum iv_format format;
-	int ret;
+	unsigned long pixel_hz;
+	int ret, source;
+
+	source = ironvideo_clock_source(iv, mode->clock);
+	if (source < 0)
+		return source;
+	pixel_hz = iv->pixel_hz[source];
 
 	for (format = IV_FORMAT_XRGB8888; format <= IV_FORMAT_YUV420; format++)
 		if (ironvideo_fourcc[format] == fb->format->format)
@@ -469,7 +493,7 @@ static int ironvideo_fb_config(struct ironvideo *iv, const struct drm_display_mo
 		return -EINVAL;
 	ret = iv_format_geometry(&iv->caps, format, mode->hdisplay,
 				 mode->vdisplay, &geometry);
-	if (ret || !ironvideo_bandwidth(iv, mode, format, &geometry))
+	if (ret || !ironvideo_bandwidth(iv, mode, format, &geometry, pixel_hz))
 		return -EINVAL;
 	*config = (struct iv_scanout) {
 		.format = format,
@@ -482,7 +506,7 @@ static int ironvideo_fb_config(struct ironvideo *iv, const struct drm_display_mo
 			.v_front = mode->vsync_start - mode->vdisplay,
 			.v_sync = mode->vsync_end - mode->vsync_start,
 			.v_back = mode->vtotal - mode->vsync_end,
-			.pixel_hz = iv->pixel_hz,
+			.pixel_hz = pixel_hz,
 			.polarity = (mode->flags & DRM_MODE_FLAG_PHSYNC ? IV_POL_HPOS : 0) |
 				    (mode->flags & DRM_MODE_FLAG_PVSYNC ? IV_POL_VPOS : 0),
 			.prefill = geometry.prefill_beats,
@@ -542,6 +566,14 @@ static int ironvideo_start(struct ironvideo *iv, const struct drm_display_mode *
 
 	if (ret)
 		return ret;
+	/* The commit tail has already drained scanout before reaching here. */
+	if (iv->caps.clock_select) {
+		bool alternate = config.mode.pixel_hz == iv->pixel_hz[1];
+
+		ret = ironvideo_errno(iv_select_clock(&iv->io, alternate, IV_POLL_BUDGET));
+		if (ret)
+			return ret;
+	}
 	if (!try_module_get(THIS_MODULE))
 		return -ENODEV;
 	drm_framebuffer_get(fb);
@@ -643,13 +675,15 @@ static int ironvideo_get_modes(struct drm_connector *connector)
 {
 	struct ironvideo *iv = to_ironvideo(connector->dev);
 	struct drm_display_mode *mode;
+	unsigned int i;
 
-	mode = drm_mode_duplicate(&iv->drm, &iv->native_mode);
-	if (!mode)
-		return 0;
-	mode->type = DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED;
-	drm_mode_probed_add(connector, mode);
-	return 1;
+	for (i = 0; i < iv->mode_count; i++) {
+		mode = drm_mode_duplicate(&iv->drm, &iv->modes[i]);
+		if (!mode)
+			break;
+		drm_mode_probed_add(connector, mode);
+	}
+	return i;
 }
 
 static const struct drm_connector_helper_funcs ironvideo_connector_helpers = {
@@ -730,6 +764,7 @@ static ssize_t row_stats_show(struct device *dev, struct device_attribute *attr,
 	u32 before, samples, after, bytes, last, worst, best, beats, bursts, errors;
 	u32 status, htotal, peak_cycles, peak_bytes;
 	struct iv_snapshot snapshot;
+	unsigned long pixel_hz;
 	ssize_t length;
 	int tries, ret;
 
@@ -767,10 +802,14 @@ static ssize_t row_stats_show(struct device *dev, struct device_attribute *attr,
 	status = readl(iv->regs + IV_REG_DMA_STATUS);
 	htotal = iv->htotal;
 	epoch = iv->epoch;
+	pixel_hz = iv->pixel_hz[0];
+	if (iv->caps.clock_select &&
+	    (readl(iv->regs + IV_REG_CLOCK_SELECT) & IV_CLOCK_ACTIVE))
+		pixel_hz = iv->pixel_hz[1];
 	mutex_unlock(&iv->hw_lock);
 
-	current_bps = last ? div_u64((u64)bytes * iv->pixel_hz, last) : 0;
-	peak_bps = peak_cycles ? div_u64((u64)peak_bytes * iv->pixel_hz, peak_cycles) : 0;
+	current_bps = last ? div_u64((u64)bytes * pixel_hz, last) : 0;
+	peak_bps = peak_cycles ? div_u64((u64)peak_bytes * pixel_hz, peak_cycles) : 0;
 	budget_permille = htotal ? div_u64((u64)worst * 1000, htotal) : 0;
 
 	length = sysfs_emit(buf,
@@ -784,7 +823,7 @@ static ssize_t row_stats_show(struct device *dev, struct device_attribute *attr,
 			  "status 0x%08x\nunderflows %u\nfifo_low_water_beats %u\nframes %u\n"
 			  "raster_xy 0x%08x\nunderflow_xy 0x%08x\nfaults 0x%08x\n"
 			  "first_fault 0x%08x\nfirst_fault_addr 0x%08x\n",
-			  epoch, iv->pixel_hz, htotal, iv->axi_hz, iv->caps.beat_bytes * 8,
+			  epoch, pixel_hz, htotal, iv->axi_hz, iv->caps.beat_bytes * 8,
 			  iv->caps.fifo_bytes, bytes, samples, after, last, best,
 			  worst, current_bps, peak_bps, budget_permille,
 			  beats, bursts, errors, status, snapshot.status, snapshot.underflows,
@@ -818,32 +857,40 @@ static const struct drm_driver ironvideo_drm_driver = {
 static int ironvideo_clocks_enable(struct ironvideo *iv)
 {
 	struct device *dev = iv->drm.dev;
+	struct clk *alternate;
+	unsigned int i;
 	int ret;
 
 	iv->clocks[0].id = "axi";
 	iv->clocks[1].id = "pixel";
+	iv->clocks[2].id = "pixel-alt";
 
-	ret = clk_bulk_get(dev, ARRAY_SIZE(iv->clocks), iv->clocks);
+	ret = clk_bulk_get(dev, 2, iv->clocks);
 	if (ret)
 		return ret;
-	ret = clk_rate_exclusive_get(iv->clocks[0].clk);
-	if (ret)
+	alternate = clk_get_optional(dev, iv->clocks[2].id);
+	if (IS_ERR(alternate)) {
+		ret = PTR_ERR(alternate);
 		goto put_clocks;
-	ret = clk_rate_exclusive_get(iv->clocks[1].clk);
-	if (ret)
-		goto release_axi_rate;
+	}
+	iv->clocks[2].clk = alternate;
+	for (i = 0; i < ARRAY_SIZE(iv->clocks); i++) {
+		ret = clk_rate_exclusive_get(iv->clocks[i].clk);
+		if (ret)
+			goto release_rates;
+	}
 	ret = clk_bulk_prepare_enable(ARRAY_SIZE(iv->clocks), iv->clocks);
 	if (ret)
-		goto release_pixel_rate;
+		goto release_rates;
 
 	iv->axi_hz = clk_get_rate(iv->clocks[0].clk);
-	iv->pixel_hz = clk_get_rate(iv->clocks[1].clk);
+	iv->pixel_hz[0] = clk_get_rate(iv->clocks[1].clk);
+	iv->pixel_hz[1] = clk_get_rate(iv->clocks[2].clk);
 	return 0;
 
-release_pixel_rate:
-	clk_rate_exclusive_put(iv->clocks[1].clk);
-release_axi_rate:
-	clk_rate_exclusive_put(iv->clocks[0].clk);
+release_rates:
+	while (i)
+		clk_rate_exclusive_put(iv->clocks[--i].clk);
 put_clocks:
 	clk_bulk_put(ARRAY_SIZE(iv->clocks), iv->clocks);
 	return ret;
@@ -851,10 +898,60 @@ put_clocks:
 
 static void ironvideo_clocks_disable(struct ironvideo *iv)
 {
+	unsigned int i = ARRAY_SIZE(iv->clocks);
+
 	clk_bulk_disable_unprepare(ARRAY_SIZE(iv->clocks), iv->clocks);
-	clk_rate_exclusive_put(iv->clocks[1].clk);
-	clk_rate_exclusive_put(iv->clocks[0].clk);
+	while (i)
+		clk_rate_exclusive_put(iv->clocks[--i].clk);
 	clk_bulk_put(ARRAY_SIZE(iv->clocks), iv->clocks);
+}
+
+static int ironvideo_read_modes(struct ironvideo *iv)
+{
+	struct device *dev = iv->drm.dev;
+	struct display_timings *timings;
+	unsigned int i;
+	int ret = 0;
+
+	timings = of_get_display_timings(dev->of_node);
+	if (!timings)
+		return -EINVAL;
+	/* Fixed-clock devices retain their original single native timing. */
+	iv->mode_count = iv->caps.clock_select ? timings->num_timings : 1;
+	iv->modes = drmm_kcalloc(&iv->drm, iv->mode_count, sizeof(*iv->modes), GFP_KERNEL);
+	if (!iv->modes) {
+		ret = -ENOMEM;
+		goto release_timings;
+	}
+
+	for (i = 0; i < iv->mode_count; i++) {
+		unsigned int index = iv->caps.clock_select ? i : timings->native_mode;
+		struct drm_display_mode *mode = &iv->modes[i];
+		struct videomode vm;
+
+		ret = videomode_from_timings(timings, &vm, index);
+		if (ret)
+			break;
+		if ((vm.pixelclock != iv->pixel_hz[0] &&
+		     (!iv->caps.clock_select || vm.pixelclock != iv->pixel_hz[1])) ||
+		    (u64)vm.hactive + vm.hfront_porch + vm.hsync_len + vm.hback_porch > U16_MAX ||
+		    (u64)vm.vactive + vm.vfront_porch + vm.vsync_len + vm.vback_porch > U16_MAX) {
+			ret = -EINVAL;
+			break;
+		}
+		drm_display_mode_from_videomode(&vm, mode);
+		if (ironvideo_mode_valid(&iv->crtc, mode) != MODE_OK) {
+			ret = -EINVAL;
+			break;
+		}
+		mode->type = DRM_MODE_TYPE_DRIVER;
+		if (index == timings->native_mode)
+			mode->type |= DRM_MODE_TYPE_PREFERRED;
+	}
+
+release_timings:
+	display_timings_release(timings);
+	return ret;
 }
 
 static int ironvideo_probe(struct platform_device *pdev)
@@ -862,7 +959,6 @@ static int ironvideo_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct ironvideo *iv;
 	struct resource *res;
-	struct videomode vm;
 	enum iv_format format;
 	int ret;
 
@@ -901,6 +997,11 @@ static int ironvideo_probe(struct platform_device *pdev)
 	ret = ironvideo_errno(iv_discover(&iv->io, &iv->caps));
 	if (ret)
 		goto clocks_off;
+	if (iv->caps.clock_select &&
+	    resource_size(res) < IV_REG_CLOCK_SELECT + sizeof(u32)) {
+		ret = -EINVAL;
+		goto clocks_off;
+	}
 	for (format = IV_FORMAT_XRGB8888; format <= IV_FORMAT_YUV420; format++)
 		if (iv_format_supported(&iv->caps, format))
 			iv->formats[iv->format_count++] = ironvideo_fourcc[format];
@@ -911,30 +1012,22 @@ static int ironvideo_probe(struct platform_device *pdev)
 	if (ret)
 		return dev_err_probe(dev, ret, "boot scanout failed to drain; retaining clocks\n");
 
-	if (!iv->axi_hz || !iv->pixel_hz ||
-	    iv->axi_hz > U32_MAX || iv->pixel_hz > U32_MAX) {
+	if (!iv->axi_hz || !iv->pixel_hz[0] ||
+	    iv->axi_hz > U32_MAX || iv->pixel_hz[0] > U32_MAX ||
+	    (iv->caps.clock_select &&
+	     (!iv->pixel_hz[1] || iv->pixel_hz[1] > U32_MAX ||
+	      iv->pixel_hz[1] / 1000 == iv->pixel_hz[0] / 1000))) {
 		ret = -EINVAL;
 		goto clocks_off;
 	}
 
-	ret = of_get_videomode(dev->of_node, &vm, OF_USE_NATIVE_MODE);
-	if (ret)
-		goto clocks_off;
-	if (vm.pixelclock != iv->pixel_hz ||
-	    (u64)vm.hactive + vm.hfront_porch + vm.hsync_len + vm.hback_porch > U16_MAX ||
-	    (u64)vm.vactive + vm.vfront_porch + vm.vsync_len + vm.vback_porch > U16_MAX) {
-		ret = -EINVAL;
-		goto clocks_off;
-	}
-	drm_display_mode_from_videomode(&vm, &iv->native_mode);
 	/* mode_valid uses crtc->dev, set by modeset_init. */
 	ret = ironvideo_modeset_init(iv);
 	if (ret)
 		goto clocks_off;
-	if (ironvideo_mode_valid(&iv->crtc, &iv->native_mode) != MODE_OK) {
-		ret = -EINVAL;
+	ret = ironvideo_read_modes(iv);
+	if (ret)
 		goto clocks_off;
-	}
 
 	platform_set_drvdata(pdev, iv);
 	ret = device_create_file(dev, &dev_attr_row_stats);

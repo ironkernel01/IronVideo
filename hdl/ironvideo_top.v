@@ -10,7 +10,8 @@ module ironvideo_top #(
   parameter integer AXI_ID_WIDTH = 1,
   parameter FAMILY = "7SERIES",
   // Bit 0 XRGB8888, bit 1 RGB565, bit 2 YUV422 (YUYV), bit 3 YUV420 (NV12).
-  parameter integer FORMAT_MASK = 1
+  parameter integer FORMAT_MASK = 1,
+  parameter integer CLOCK_SELECT = 0
 ) (
   (* X_INTERFACE_INFO = "xilinx.com:signal:clock:1.0 axi_clk CLK", X_INTERFACE_PARAMETER = "ASSOCIATED_BUSIF S_AXI:M_AXI, ASSOCIATED_RESET reset_n" *)
   input wire axi_clk,
@@ -18,6 +19,10 @@ module ironvideo_top #(
   input wire pixel_clk,
   (* X_INTERFACE_INFO = "xilinx.com:signal:clock:1.0 serial_clk CLK" *)
   input wire serial_clk,
+  (* X_INTERFACE_INFO = "xilinx.com:signal:clock:1.0 pixel_clk_alt CLK" *)
+  input wire pixel_clk_alt,
+  (* X_INTERFACE_INFO = "xilinx.com:signal:clock:1.0 serial_clk_alt CLK" *)
+  input wire serial_clk_alt,
   (* X_INTERFACE_INFO = "xilinx.com:signal:reset:1.0 reset_n RST", X_INTERFACE_PARAMETER = "POLARITY ACTIVE_LOW" *)
   input wire reset_n,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI AWADDR", X_INTERFACE_PARAMETER = "PROTOCOL AXI4LITE, ADDR_WIDTH 16, DATA_WIDTH 32, HAS_PROT 1" *)
@@ -110,11 +115,12 @@ module ironvideo_top #(
 
   ironvideo_hdmi_7series #(
     .DATA_WIDTH(DATA_WIDTH), .MAX_BURST(MAX_BURST), .FIFO_KIB(FIFO_KIB),
-    .ARQOS(ARQOS), .AXI_ID_WIDTH(AXI_ID_WIDTH), .FORMAT_MASK(FORMAT_MASK)
+    .ARQOS(ARQOS), .AXI_ID_WIDTH(AXI_ID_WIDTH), .FORMAT_MASK(FORMAT_MASK), .CLOCK_SELECT(CLOCK_SELECT)
   ) video (
     .axi_clk(axi_clk),
     .pixel_clk(pixel_clk),
     .serial_clk(serial_clk),
+    .pixel_clk_alt(pixel_clk_alt), .serial_clk_alt(serial_clk_alt),
     .reset_n(reset_n),
     .s_axi_awaddr((|s_axi_awaddr[15:8]) ? 8'hff : s_axi_awaddr[7:0]),
     .s_axi_awprot(s_axi_awprot),

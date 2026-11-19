@@ -39,7 +39,7 @@ to 32 bits. The first pixel address, active
 row byte count, and stride must align to the configured AXI data beat. The
 driver stops and drains scanout before changing timing or the aperture.
 A framebuffer switch can blank the display. DRM completes events in software.
-The interface covers fixed-clock progressive video and local DMA buffers.
+The interface covers progressive video at the board's supplied pixel rates and local DMA buffers.
 Hardware vblank events, seamless flips, EDID/hotplug, imported DMA buffers,
 and HDMI audio are outside its scope.
 
@@ -48,16 +48,17 @@ and HDMI audio are outside its scope.
 | Property | Meaning |
 | --- | --- |
 | `compatible` | `"ironkernel,ironvideo-v1"` |
-| `reg` | AXI4-Lite MMIO range including `0x97` for v1.1 or `0xb7` for v1.2 |
-| `clocks` / `clock-names` | Clock handles named `"axi"` and `"pixel"` |
-| `display-timings` | Native progressive timing with an exact `clock-frequency`, active dimensions, porches, sync lengths and polarities |
+| `reg` | AXI4-Lite range through `0x97` for v1.1, `0xb7` for the format extension, or `0xbb` for the clock selector |
+| `clocks` / `clock-names` | Clock handles named `"axi"` and `"pixel"`. Add `"pixel-alt"` for the second clock pair on a selectable design. |
+| `display-timings` | Progressive modes with pixel rate, active dimensions, porches, sync lengths and polarities. The `native-mode` property selects the preferred mode. |
 
 The platform supplies a running serializer clock at five times the pixel rate
 with a fixed phase relationship and releases the common reset after clock
-startup. The driver enables and holds the AXI and pixel clock rates while
-bound. Both clocks must continue during stop, commit, and snapshot handshakes.
-The native mode pixel rate must match the clock in Hz. Additional DRM modes
-must match the pixel clock in integer kHz, use valid progressive timing,
+startup. Keep the supplied clocks running through stop, commit and snapshot
+handshakes. When the hardware advertises the clock selector, the driver drains
+scanout, selects the pair matching the requested mode and waits for the selector
+to report ready before enabling the raster. Additional DRM modes
+must match a supplied pixel rate in integer kHz, use valid progressive timing,
 fit the hardware's 16-bit axis totals, and pass FIFO and alignment checks.
 The frame period limit is 200 ms. Packed formats use raw AXI bandwidth as
 their admission ceiling. For NV12, inserting the expanded chroma/luma data
@@ -66,8 +67,7 @@ ceiling is three fifths of raw AXI bandwidth. At 25 MHz with a 32-bit port,
 the raw ceiling is 100 MB/s and the NV12 ceiling is 60 MB/s, below the
 82.944 MB/s required for 720p60 NV12. These ceilings are necessary checks.
 Use actual row service and FIFO measurements under the intended DDR
-contention to qualify a board. Changing the pixel rate requires a platform
-clock and reset sequence.
+contention to qualify a board.
 
 The driver checks the ID and ABI, masks the hardware fault IRQ, and stops
 and drains any firmware scanout before accepting a KMS mode. Keep firmware's

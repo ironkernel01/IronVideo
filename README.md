@@ -17,6 +17,14 @@ puzzle cube, color bars and framebuffer format, and reports measured scanout
 bandwidth and animation frame rate.
 Each integrating board supplies its clocks, memory map and constraints.
 
+With `CLOCK_SELECT=1`, the board MMCM supplies two continuously running
+pixel/5× serializer pairs to the public top. Two internal 7-series BUFGMUXes
+select the matching pair while scanout is quiesced. AXI4-Lite register
+`0xb8` selects the pair and acknowledges the switch. The Zybo reference
+uses 74.25/371.25 MHz for 720p60 and 148.5/742.5 MHz for experimental
+1080p60. The latter exceeds the rated clock network speed on the XC7Z020-1.
+Single-pair integrations use the default `CLOCK_SELECT=0`.
+
 The product brief and Nexys demo guide are in `documentation/iron_brief.md`
 and `documentation/iron_brief.pdf`.
 The full integration and register specification is in

@@ -37,7 +37,7 @@ $sources += @('ironvideo_tmds_encoder', 'ironvideo_tmds_lane_7series', 'ironvide
 $sources = $sources | ForEach-Object { Join-Path $PSScriptRoot "hdl/$_.sv" }
 $sources += Join-Path $PSScriptRoot 'hdl/ironvideo_top.v'
 $sources += @('ironvideo_format_model', 'tb_ironvideo', 'tb_ironvideo_formats', 'tb_ironvideo_reader_limits', 'tb_ironvideo_nv12_reader', 'tb_ironvideo_row_stats', 'tb_ironvideo_720p',
-    'tb_ironvideo_tmds', 'tb_ironvideo_tmds_7series', 'tb_ironvideo_hdmi_7series') |
+    'tb_ironvideo_tmds', 'tb_ironvideo_tmds_7series', 'tb_ironvideo_hdmi_7series', 'tb_ironvideo_clock_select') |
     ForEach-Object { Join-Path $PSScriptRoot "testbench/$_.sv" }
 $sources += Join-Path $vivadoData.FullName 'verilog/src/glbl.v'
 $toolPaths = @('xvlog.bat', 'xelab.bat', 'xsim.bat', 'setupEnv.bat', 'loader.bat',
@@ -101,6 +101,7 @@ try {
     Invoke-Simulator -Tool xvlog -Arguments (@('--sv', '--log', 'compile.log') + $sources)
     $logs['compile.log'] = Get-Sha256 'compile.log'
     $unisim = @('work.glbl', '-L', 'unisims_ver', '-L', 'secureip')
+    Invoke-Regression -Top tb_ironvideo_clock_select -Pass 'TEST PASS: IronVideo software clock selection, both clock pairs and active scanout interlock' -Libraries $unisim
     Invoke-Regression -Top tb_ironvideo -Pass 'TEST PASS: IronVideo 32/64/128-bit regression' -Libraries $unisim
     Invoke-Regression -Top tb_ironvideo_reader_limits -Pass 'TEST PASS: IronVideo reader burst limits'
     Invoke-Regression -Top tb_ironvideo_nv12_reader -Pass 'TEST PASS: IronVideo NV12 reader widths, chroma reuse, packing and drain'

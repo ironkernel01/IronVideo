@@ -7,7 +7,7 @@
 #include "ironvideo_core.h"
 
 struct fixture {
-	iv_u32 registers[46];
+	iv_u32 registers[IV_REG_CLOCK_SELECT / 4 + 1];
 	iv_u32 extension_reads, extension_writes, writes, barriers, delays;
 	iv_u32 next_status, status_reads;
 	int frozen, reject_commit;
@@ -17,7 +17,7 @@ static iv_u32 fixture_read(void *context, iv_u32 offset)
 {
 	struct fixture *f = context;
 
-	assert(!(offset & 3) && offset <= IV_REG_PEAK_RATE_BYTES);
+	assert(!(offset & 3) && offset <= IV_REG_CLOCK_SELECT);
 	if (offset >= IV_REG_FORMAT_CAPS)
 		f->extension_reads++;
 	if (offset == IV_REG_STATUS && f->status_reads && !f->frozen &&
@@ -30,12 +30,17 @@ static void fixture_write(void *context, iv_u32 offset, iv_u32 value)
 {
 	struct fixture *f = context;
 
-	assert(!(offset & 3) && offset <= IV_REG_PEAK_RATE_BYTES);
+	assert(!(offset & 3) && offset <= IV_REG_CLOCK_SELECT);
 	f->writes++;
 	if (offset >= IV_REG_FORMAT_CAPS)
 		f->extension_writes++;
 	if (offset == IV_REG_FAULT) {
 		f->registers[offset / 4] &= ~value;
+		return;
+	}
+	if (offset == IV_REG_CLOCK_SELECT) {
+		f->registers[offset / 4] = f->frozen ? value :
+			IV_CLOCK_READY | (value ? IV_CLOCK_ACTIVE | IV_CLOCK_REQUEST : 0);
 		return;
 	}
 	f->registers[offset / 4] = value;
@@ -224,6 +229,22 @@ int main(void)
 	f.registers[IV_REG_FORMAT_CAPS / 4] = 16;
 	assert(iv_discover(&io, &caps) == IV_INVALID);
 
-	puts("IronVideo portable driver PASS (15 masks × 3 widths, legacy MMIO, NV12 apertures and faults)");
+	fixture_init(&f, 64, 1);
+	assert(iv_select_clock(&io, 0, 8) == IV_OK);
+	assert(iv_select_clock(&io, 1, 8) == IV_UNSUPPORTED);
+	assert(f.extension_reads == 0 && f.extension_writes == 0);
+	f.registers[IV_REG_CAPS / 4] |= IV_CAP_CLOCK_SELECT;
+	f.registers[IV_REG_CLOCK_SELECT / 4] = IV_CLOCK_READY;
+	f.registers[IV_REG_STATUS / 4] = IV_ST_QUIESCED;
+	assert(iv_discover(&io, &caps) == IV_OK && caps.clock_select);
+	assert(iv_select_clock(&io, 1, 8) == IV_OK);
+	assert(f.registers[IV_REG_CLOCK_SELECT / 4] == 7);
+	assert(iv_select_clock(&io, 0, 8) == IV_OK);
+	f.registers[IV_REG_STATUS / 4] = IV_ST_APPLIED;
+	assert(iv_select_clock(&io, 1, 8) == IV_INVALID);
+	f.registers[IV_REG_STATUS / 4] = IV_ST_QUIESCED;
+	f.frozen = 1;
+	assert(iv_select_clock(&io, 1, 8) == IV_TIMEOUT);
+	puts("IronVideo portable driver PASS (format masks, legacy MMIO, NV12, faults and clock switching)");
 	return 0;
 }
