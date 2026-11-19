@@ -17,7 +17,8 @@ puzzle cube, color bars and framebuffer format, and reports measured scanout
 bandwidth and animation frame rate.
 Each integrating board supplies its clocks, memory map and constraints.
 
-The three-page product brief is in `documentation/ironvideo_brief.pdf`.
+The product brief and Nexys demo guide are in `documentation/iron_brief.md`
+and `documentation/iron_brief.pdf`.
 The full integration and register specification is in
 `documentation/ironvideo_specification.pdf`. Their Markdown sources and
 architecture drawing are in the same documentation directory.

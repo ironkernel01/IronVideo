@@ -8,7 +8,7 @@ $renderer = Join-Path $toolRoot 'documentation/build_pdf.ps1'
 $validator = Join-Path $toolRoot 'documentation/pdf/validate.ps1'
 $core = Split-Path -Parent $PSScriptRoot
 
-foreach ($name in 'ironvideo_brief', 'ironvideo_specification') {
+foreach ($name in 'iron_brief', 'ironvideo_specification') {
     $source = Join-Path $PSScriptRoot "$name.md"
     $pdf = Join-Path $PSScriptRoot "$name.pdf"
     & $renderer -Name $name -Source $source -Output $pdf

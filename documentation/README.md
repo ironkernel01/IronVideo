@@ -2,7 +2,7 @@
 
 | Publication | Contents |
 | --- | --- |
-| `ironvideo_brief.pdf` | Three-page product brief covering the scanout path, supported configurations, DDR payload requirements and demonstrated modes. |
+| `iron_brief.md` and `iron_brief.pdf` | Product brief with a Nexys bare-metal demo guide on page 4 covering the Vivado sources, programming image, UART controls and measured performance. |
 | `ironvideo_specification.pdf` | Engineering specification for native formats, registers, DDR measurement, firmware and Linux integration, the Nexys bare-metal demo, and verification. |
 
 The matching Markdown files are the publication sources. Both use the architecture illustration in `assets/architecture.png`.

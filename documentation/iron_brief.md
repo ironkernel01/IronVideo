@@ -52,10 +52,32 @@ Use AXI4-Lite to set a permitted framebuffer address window, storage stride and 
 | Output hardware | Provide legal OSERDESE2 placement, a TMDS_33-capable bank, connector pin assignments and timing constraints. |
 | Display features | The interface supports progressive RGB and YUV memory formats and DVI-compatible TMDS video. Audio, HDMI infoframes, DDC/EDID and scaling require additional logic or software. |
 
-The Nexys reference design in `refdesign/nexys/` connects MicroBlaze, UART, DDR3 and IronVideo. At fixed 720p60 it shows color bars or a rotating, folding cube, with UART controls for all four native framebuffer formats and DDR scanout measurements. Firmware renders the 192 × 144 cube, magnifies it by two and writes changed spans in the selected format. Set `FORMAT_MASK` to select the formats available in an integration. Qualify the chosen mode on the target board under realistic DDR traffic.
+Set the synthesis parameter `FORMAT_MASK` to select any nonempty combination of the four native formats. The shared driver discovers the enabled formats and software selects one for scanout.
+
+</div>
+<div class="brief-page">
+
+## Nexys Video bare-metal demo
+
+The demo boots into a rotating RGB565 puzzle cube on HDMI at 1280 × 720, 60 Hz. Six hinged 3 × 3 faces unfold and close over a starfield. The 80 MHz MicroBlaze generates 128 poses at startup. During playback it writes only changed spans in a centered 384 × 288 window, updating each half after scanout passes it.
 
 <img src="assets/nexys-cube.png" alt="Cube animation from assembled through unfolded and back" style="display:block;width:88%;margin:0 auto;">
 
-**Figure 2.** The cube rotates and unfolds into six tiled panels. The 80 MHz MicroBlaze presented 60 distinct frames per second in all four formats during board testing, with zero missed updates or scanout underflows.
+**Figure 2.** Eight poses from the demo renderer. Hardware testing measured 60 distinct frames per second over 360 frames in each format, with zero missed windows, late updates, scanout underflows or AXI faults.
+
+### Run and control the demo
+
+From the IronVideo repository root, run `powershell -ExecutionPolicy Bypass -File refdesign/nexys/build.ps1`. The script runs the Vivado design Tcl in `refdesign/nexys/build.tcl` and instantiates the RTL top in `hdl/ironvideo_top.v`. A full build produces `project/nexys.xpr` and `nexys-ironvideo-demo.bit` inside its output directory under `build/nexys-ref/`. Program the XC7A200T with that bitstream in Vivado Hardware Manager. It includes the MicroBlaze firmware in BRAM.
+
+Connect HDMI OUT to the monitor and open the USB UART at **115200 8N1**. Press one key to select the scene or its framebuffer format.
+
+| Key | Action |
+|---|---|
+| `C` / `B` | Show the folding cube / static color bars. |
+| `A` | Cycle the color bars through all four formats. |
+| `1` / `2` / `3` / `4` | Select XRGB8888 / RGB565 / YUV422 (YUYV) / YUV420 (NV12). |
+| `?` | Print the menu. |
+
+The UART reports IronVideo’s average DDR read bandwidth, peak row bandwidth and last row fetch time. In cube mode it also reports presentation rate and missed or late updates. The firmware entry point is `refdesign/nexys/main.c`.
 
 </div>
