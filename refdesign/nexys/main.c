@@ -194,14 +194,14 @@ static void fail(const char *stage)
     for (;;) { }
 }
 
-enum scene { CUBE, BARS, CYCLE };
+enum scene { CUBE, BARS };
 
 static enum scene selected_scene = CUBE;
 static unsigned selected_format = IV_FORMAT_RGB565;
 
 static void show_menu(void)
 {
-    put_text("\nC cube | B bars | A cycle bars | 1 XRGB8888 | 2 RGB565 | "
+    put_text("\nC cube | B bars | 1 XRGB8888 | 2 RGB565 | "
              "3 YUV422/YUYV | 4 YUV420/NV12 | ? menu\n");
 }
 
@@ -224,13 +224,9 @@ static int menu_input(void)
     if (key >= 'A' && key <= 'Z') key += 'a' - 'A';
     if (key >= '1' && key <= '4') {
         selected_format = key - '1';
-        if (selected_scene == CYCLE) selected_scene = BARS;
     } else if (key == 'c') selected_scene = CUBE;
     else if (key == 'b') selected_scene = BARS;
-    else if (key == 'a') {
-        selected_scene = CYCLE;
-        selected_format = IV_FORMAT_XRGB8888;
-    } else {
+    else {
         if (key != '\r' && key != '\n') show_menu();
         return 0;
     }
@@ -256,7 +252,7 @@ static struct iv_geometry start_scene(const struct iv_caps *caps)
         fail("plane geometry");
     config.mode.prefill = geometry.prefill_beats;
     put_text("\n720p60 ");
-    put_text(selected_scene == CUBE ? "cube " : selected_scene == BARS ? "bars " : "cycle bars ");
+    put_text(selected_scene == CUBE ? "cube " : "bars ");
     put_text(format->name);
     put_text("\n");
     if (iv_stop(&video, POLL_BUDGET))
@@ -411,10 +407,6 @@ static void run_scene(const struct iv_caps *caps)
         }
         if (now.frames - first.frames >= FRAMES_PER_READING) {
             report(&first, &now, &geometry, caps->beat_bytes, &stats);
-            if (selected_scene == CYCLE) {
-                selected_format = (selected_format + 1) % 4;
-                return;
-            }
             first = now;
             stats = (struct animation_stats){0};
         }

@@ -69,12 +69,11 @@ The demo boots into a rotating RGB565 puzzle cube on HDMI at 1280 × 720, 60 Hz.
 
 From the IronVideo repository root, run `powershell -ExecutionPolicy Bypass -File refdesign/nexys/build.ps1`. The script runs the Vivado design Tcl in `refdesign/nexys/build.tcl` and instantiates the RTL top in `hdl/ironvideo_top.v`. A full build produces `project/nexys.xpr` and `nexys-ironvideo-demo.bit` inside its output directory under `build/nexys-ref/`. Program the XC7A200T with that bitstream in Vivado Hardware Manager. It includes the MicroBlaze firmware in BRAM.
 
-Connect HDMI OUT to the monitor and open the USB UART at **115200 8N1**. Press one key to select the scene or its framebuffer format.
+Connect HDMI OUT to the monitor and open the USB UART at **115200 8N1**. The color bars stay in the selected format until you press a different format key.
 
 | Key | Action |
 |---|---|
 | `C` / `B` | Show the folding cube / static color bars. |
-| `A` | Cycle the color bars through all four formats. |
 | `1` / `2` / `3` / `4` | Select XRGB8888 / RGB565 / YUV422 (YUYV) / YUV420 (NV12). |
 | `?` | Print the menu. |
 

@@ -59,8 +59,7 @@ single keystroke.
 | Key | Action |
 |---|---|
 | C | Show the rotating and folding cube. |
-| B | Show static color bars. The lower quarter reverses the order. |
-| A | Show color bars and cycle through all four formats, two seconds per measurement. |
+| B | Hold the color bars in the manually selected format. The lower quarter reverses the order. |
 | 1–4 | Select XRGB8888, RGB565, YUV422 or YUV420 respectively. |
 | ? | Print the menu. |
 
