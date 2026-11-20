@@ -12,10 +12,12 @@
 
 # IronVideo specification
 
-<div class="brief-band">A portable AXI4 framebuffer reader and RGB raster with AXI4-Lite control. Connect the pixel output to a board transmitter or serialize it in the FPGA.</div>
+<div class="brief-band">IronVideo is an AXI4 bus master. Once configured, it reads the framebuffer from DDR on every frame without CPU intervention.</div>
 
-IronVideo reads a software-owned framebuffer in DDR and produces registered RGB,
-data enable, horizontal sync and vertical sync. The portable SystemVerilog
+The CPU sets the framebuffer address, stride, format and display timing over
+AXI4-Lite, then enables scanout. IronVideo generates the DDR read addresses,
+issues burst reads and feeds the pixel FIFO. The raster produces registered
+RGB, data enable, horizontal sync and vertical sync. The portable SystemVerilog
 scanout can feed an external transmitter. The public `ironvideo_top` joins
 the scanout with the included 7-series serializer. Firmware and Linux use
 the same register map.
@@ -23,7 +25,7 @@ the same register map.
 | Interface | Contract |
 |---|---|
 | Control | 32-bit AXI4-Lite, byte strobes, readable shadow state |
-| Memory | Read-only AXI4, 32-bit byte addresses, 32/64/128-bit data, up to four outstanding bursts for packed formats |
+| Memory | Read-only AXI4 bus master, 32-bit byte addresses, 32/64/128-bit data, up to four outstanding bursts for packed formats |
 | Pixel | One output pixel per active pixel clock, with format-specific memory unpacking and registered 24-bit RGB and timing outputs |
 | TMDS | Three differential data pairs and one forwarded clock pair, 10-bit DDR serialization |
 | Diagnostics | Sticky faults and masked interrupt, coherent raster snapshots, live row timing and request counters |
