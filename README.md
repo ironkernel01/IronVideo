@@ -25,11 +25,10 @@ uses 74.25/371.25 MHz for 720p60 and 148.5/742.5 MHz for experimental
 1080p60. The latter exceeds the rated clock network speed on the XC7Z020-1.
 Single-pair integrations use the default `CLOCK_SELECT=0`.
 
-The product brief and Nexys demo guide are in `documentation/iron_brief.md`
-and `documentation/iron_brief.pdf`.
-The full integration and register specification is in
-`documentation/ironvideo_specification.pdf`. Their Markdown sources and
-architecture drawing are in the same documentation directory.
+The IronVideo specification covers the register interface, FPGA compatibility,
+the bare-metal MicroBlaze demo on Nexys Video and Linux scanout on the Zynq-based Zybo Z7-20.
+[Read the specification](documentation/ironvideo_specification.md) or
+[open the PDF](documentation/ironvideo_specification.pdf).
 
 | Module | Interface and role |
 | --- | --- |

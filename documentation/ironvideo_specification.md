@@ -17,8 +17,8 @@
 IronVideo reads a software-owned framebuffer in DDR and produces registered RGB,
 data enable, horizontal sync and vertical sync. The portable SystemVerilog
 scanout can feed an external transmitter. The public `ironvideo_top` joins
-the scanout with the included 7-series serializer. Firmware and Linux share
-the register definitions in `driver/ironvideo_regs.h`.
+the scanout with the included 7-series serializer. Firmware and Linux use
+the same register map.
 
 | Interface | Contract |
 |---|---|
@@ -58,36 +58,28 @@ phase-related serializer clocks.
 | `ironvideo_row_stats` | Times DDR row service using the pixel-domain timebase. |
 | `ironvideo_tmds_7series` | Three encoders, three serialized data lanes and a forwarded clock lane |
 
-Compile `ironvideo_pkg.sv` first, then the reset, FIFO, reader, raster,
-plane-bounds, color, row-statistics and scanout modules in `hdl/`. For TMDS, add the encoder,
-7-series lane and transmitter, the internal composition and `ironvideo_top.v`.
-Include the AMD I/O primitives for the 7-series backend.
-
 </div>
 <div class="brief-page">
 
 ## FPGA compatibility
 
 The portable `ironvideo_scanout` interface supplies RGB, DE, HS and VS on
-the pixel clock. It can drive an external parallel-input video transmitter
-directly. For FPGA-generated TMDS, reuse the encoder and provide three
-serialized data pairs and one phase-aligned forwarded clock pair. The supplied
-`ironvideo_top` implements this last stage with AMD 7-series primitives.
+the pixel clock. It supports boards with an external parallel-input video
+transmitter and FPGA families with suitable serializer outputs. The two
+reference boards use the supplied AMD 7-series TMDS transmitter.
 
-| FPGA family | TMDS output implementation | IronVideo evidence or porting work |
-|---|---|---|
-| AMD Artix-7 | Supplied cascaded OSERDESE2 lanes | Physical Nexys Video reference, 720p60 in all four formats. |
-| AMD Zynq-7000 | Supplied OSERDESE2 lanes in programmable logic | Physical Zybo Z7-20 reference, 720p60 and engineering 1080p60. |
-| AMD Spartan-7, Kintex-7, Virtex-7 | Same OSERDESE2 architecture | Candidate for the supplied wrapper. Select a suitable package, output bank, clock route and speed grade, then qualify the board. |
-| AMD Kintex and Virtex UltraScale / UltraScale+, Zynq UltraScale+ MPSoC | OSERDESE3 with 4:1 or 8:1 DDR gearing | A family-specific wrapper must repack the continuous 10-bit TMDS symbol stream into the serializer width and generate its clocks. |
-| AMD Versal devices with XPIO | XPHY via Advanced I/O Wizard | A new wrapper must adapt the symbol stream to the configured XPHY width and maintain data-lane and forwarded-clock alignment. |
-| Altera Cyclone 10 GX, Arria 10 | LVDS SERDES transmitter IP supports 10:1 gearing | A new wrapper must map the serialized bit order, provide any required memory-bus bridge, and connect a TMDS-compatible electrical output stage. |
+| FPGA family | Reference board or project availability |
+|---|---|
+| AMD Artix-7 | Nexys Video demonstrated 720p60 in all four framebuffer formats. |
+| AMD Zynq-7000 | Zybo Z7-20 demonstrated 720p60 and engineering operation at 1080p60. |
+| AMD Spartan-7, Kintex-7, Virtex-7 | Available for project integration. |
+| AMD Kintex and Virtex UltraScale / UltraScale+, Zynq UltraScale+ MPSoC | Available for project integration. |
+| AMD Versal devices with XPIO | Available for project integration. |
+| Altera Cyclone 10 GX, Arria 10 | Available for project integration. |
 
-A family entry alone does not qualify a resolution. Check the actual pin
-bank, differential signaling or external line driver, permitted serializer
-clock and line rate for the speed grade. Verify the forwarded clock and all
-three data lanes at the connector. An LVDS serializer supplies gearing;
-the board must also meet the sink’s TMDS voltage and termination requirements.
+Supported display modes depend on the selected device, speed grade and
+board output circuitry. The reference sections give the measured timing
+and scanout results for Nexys Video and Zybo Z7-20.
 
 **Device references.** AMD UG471 / UG953 (7-series OSERDESE2), UG571
 (UltraScale SelectIO), AM010 / PG320 (Versal XPHY), and Altera document
@@ -473,7 +465,7 @@ or aggregate DDR controller utilization.
 
 ### Firmware handoff
 
-U-Boot builds `driver/ironvideo.c` with `__UBOOT__`. The board calls
+U-Boot uses the shared firmware driver. The board calls
 `ironvideo_boot_scanout()` with mapped registers, reserved framebuffer
 address and size, stride, display timing and XRGB8888 fill color. The helper
 validates bounds and timing, drains scanout, fills and flushes the framebuffer,
@@ -511,11 +503,11 @@ selected bits in IRQ_MASK.
 </div>
 <div class="brief-page">
 
-## Nexys bare-metal reference design
+## Nexys Video reference · bare-metal MicroBlaze
 
-The stand-alone design in `refdesign/nexys/` connects the MicroBlaze processor and the independent 128-bit IronVideo reader to DDR3. The reference CPU and 128-bit AXI fabric run at 80 MHz. The MIG receives separate 100 MHz input and 200 MHz reference clocks. BRAM contains the reset vectors and firmware. UARTLite provides scene and format controls and reports scanout measurements. The reference enables `FORMAT_MASK=15` and supplies the 74.25 MHz pixel clock and phase-related 371.25 MHz serializer clock for 1280 × 720 at 60 Hz.
+The Nexys Video reference design connects the MicroBlaze processor and the independent 128-bit IronVideo reader to DDR3. The reference CPU and 128-bit AXI fabric run at 80 MHz. The MIG receives separate 100 MHz input and 200 MHz reference clocks. BRAM contains the reset vectors and firmware. UARTLite provides scene and format controls and reports scanout measurements. The reference enables `FORMAT_MASK=15` and supplies the 74.25 MHz pixel clock and phase-related 371.25 MHz serializer clock for 1280 × 720 at 60 Hz.
 
-Firmware uses the same `driver/ironvideo_core.h` discovery, validation, stop and programming routines as Linux and U-Boot. The UART menu selects the folding cube (C), static bars (B), a native format (1–4), or help (?). The selected format stays active until another format is chosen. The CPU generates 128 indexed poses, magnifies the 192 × 144 scene by two and caches the changed pixel spans. During playback, it writes each half of the window after scanout passes it. UART reports average scanout bandwidth, peak row service rate, last row time in microseconds, FIFO low-water and animation deadlines.
+Bare-metal firmware, Linux and U-Boot share the routines for device discovery, mode validation and scanout control. The UART menu selects the folding cube (C), static bars (B), a native format (1–4), or help (?). The selected format stays active until another format is chosen. The CPU generates 128 indexed poses, magnifies the 192 × 144 scene by two and caches the changed pixel spans. During playback, it writes each half of the window after scanout passes it. UART reports average scanout bandwidth, peak row service rate, last row time in microseconds, FIFO low-water and animation deadlines.
 
 | 720p60 format | Primary row | UV row | Scanout payload | Longest measured CPU update |
 |---|---:|---:|---:|---:|
@@ -528,12 +520,32 @@ The physical board presented 60.000 distinct animation frames per second over 36
 
 The routed all-format reference uses 15,131 LUTs, 16,601 flip-flops, 22 block RAM tiles and 10 DSPs across the complete design. Its timing report gives +0.534 ns setup slack and +0.012 ns hold slack. UpdateMEM embeds the firmware into processor BRAM in the deliverable bitstream.
 
-Physical output on the Nexys reference is limited to 720p60. The generic core verification includes 1080p60 simulation. Its 742.5 MHz serializer clock exceeds the rated clock network speed of the Nexys Artix-7 −1 part. Use the reference directory's build and UART instructions to reproduce the demonstration.
+Physical output on the Nexys reference is limited to 720p60. The generic core verification includes 1080p60 simulation. Its 742.5 MHz serializer clock exceeds the rated clock network speed of the Nexys Artix-7 −1 part.
 
 </div>
 <div class="brief-page">
 
-## Zybo Z7-20 Linux reference
+## Nexys Video demo · folding cube and color bars
+
+Connect HDMI OUT to a 720p60 display and open the USB UART at 115200 baud,
+8N1. The demo starts with the folding cube in RGB565. Press `C` for the cube
+or `B` for the bars. Keys `1` through `4` select XRGB8888, RGB565, YUYV
+and NV12 respectively. Press `?` to display the menu.
+
+<div style="width:92%;margin:0 auto"><img src="assets/nexys-cube.png" alt="Eight rendered poses of the Nexys puzzle cube folding out and closing over a starfield"></div>
+
+**Figure 2.** Eight poses from the bare-metal demo renderer. The MicroBlaze
+animates a centered 384 × 288 window within the 1280 × 720 raster.
+
+<div style="width:62%;margin:0 auto"><img src="assets/nexys-color-bars.png" alt="Nexys static color bars with the color order reversed across the bottom quarter"></div>
+
+**Figure 3.** The static test screen reverses the bar order in the bottom
+quarter. Switching formats keeps the pattern in place for visual comparison.
+
+</div>
+<div class="brief-page">
+
+## Zybo Z7-20 reference · Linux on Zynq-7000
 
 On the Digilent Zybo Z7-20, Linux on the Zynq-7000 Cortex-A9 owns the DRM
 framebuffer in PS DDR. IronVideo reads it through the 64-bit HP0 port.
@@ -549,7 +561,7 @@ changed rectangle to the active DRM buffer and restores the console on exit.
 
 <div style="width:76%;margin:0 auto"><img src="assets/zybo-linux-cube.png" alt="Zybo Linux framebuffer capture of the rotating multicolored cube with its top layer turning"></div>
 
-**Figure 2.** Native 1920 × 1080 XRGB8888 pixels read back from the active
+**Figure 4.** Native 1920 × 1080 XRGB8888 pixels read back from the active
 Zybo framebuffer during the muted demo. The camera was idle.
 
 | Physical measurement | Result |
@@ -561,8 +573,7 @@ Zybo framebuffer during the muted demo. The camera was idle.
 The AXI domain closed setup/hold at +0.414/+0.052 ns. The 742.5 MHz
 serializer exceeded the XC7Z020-1 clock-network rating and missed the
 pulse-width check by 0.320 ns. The physical 1080p60 result applies to this
-board and monitor. The matched hardware and Linux integration are in
-`IronForge/platforms/zybo-z7-20/`; its board brief records the test conditions.
+board and monitor.
 
 </div>
 <div class="brief-page">
@@ -581,22 +592,7 @@ board and monitor. The matched hardware and Linux integration are in
 | Public AXI-to-TMDS top | AXI-Lite address handling, framebuffer DDR reads and decoded colors. Unsupported family elaboration is rejected. |
 | Serialized full frames | Independent 720p60 and 1080p60 pin receivers check timing and decoded pixels. The reversed-clock control expects rejection at the first pixel. |
 
-From the standalone Windows checkout, supply paths to Vivado and Active-HDL
-for your installation and use the positive receipt printed by the two-mode run.
-
-```powershell
-./simulate.ps1 -VivadoBin 'C:/AMDDesignTools/2026.1/Vivado/bin'
-$aldecBin = 'C:/Aldec/Active-HDL-11.1-x64/bin'
-$vivadoData = 'C:/AMDDesignTools/2026.1/data'
-foreach ($fmt in 'XRGB8888','RGB565','YUV422','YUV420') {
-    ./activehdl.ps1 -AldecBin $aldecBin -VivadoData $vivadoData -PixelFormat $fmt
-}
-$positiveReceipt = 'build/<positive-run>/receipt.json'
-./activehdl-negative-clock.ps1 -AldecBin $aldecBin -PositiveReceipt $positiveReceipt
-```
-
-Runs create unique log and receipt directories under `build/`. The XSim
-runner uses installed UNISIM and SecureIP libraries. Active-HDL uses the
+XSim uses the UNISIM and SecureIP libraries. Active-HDL uses the
 installed OSERDESE2 and OBUFDS models and a shared independent TMDS receiver.
 
 For a new board, check IP identity and capabilities, verify clocks and reset
