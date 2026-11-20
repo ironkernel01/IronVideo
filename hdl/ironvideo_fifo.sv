@@ -25,9 +25,9 @@ module ironvideo_fifo #(
   localparam int DEPTH = 2**FIFO_AW;
   typedef logic [FIFO_AW:0] ptr_t;
   (* ram_style = "block" *) logic [DATA_WIDTH-1:0] memory [0:DEPTH-1];
-  ptr_t write_ptr;
+  ptr_t write_ptr, write_next, read_limit;
   ptr_t write_gray;
-  ptr_t read_ptr;
+  ptr_t read_ptr, read_previous, write_sample;
   ptr_t read_gray;
   (* ASYNC_REG = "TRUE" *) ptr_t read_gray_sync [0:3];
   (* ASYNC_REG = "TRUE" *) ptr_t write_gray_sync [0:3];
@@ -44,13 +44,12 @@ module ironvideo_fifo #(
     return result;
   endfunction
 
-  assign wr_free = ptr_t'(DEPTH) - (write_ptr - binary(read_gray_sync[3]));
   assign wr_cursor = write_gray;
-  assign rd_count = binary(write_gray_sync[3]) - read_ptr + ptr_t'(rd_valid);
   assign rd_cursor = read_gray;
   wire write_memory = !wr_rst && wr_push && wr_free != 0;
-  wire read_memory = !rd_rst && (!rd_valid || rd_pop)
-           && read_gray != write_gray_sync[3];
+  wire read_memory = !rd_rst && (!rd_valid || rd_pop) && rd_count > ptr_t'(rd_valid);
+  wire ptr_t count_after_pop = write_sample - read_ptr;
+  wire ptr_t count_with_held = write_sample - read_previous;
 
   always_ff @(posedge wr_clk)
     if (write_memory)
@@ -63,16 +62,25 @@ module ironvideo_fifo #(
   always_ff @(posedge wr_clk) begin
     if (wr_rst) begin
       write_ptr <= '0;
+      write_next <= ptr_t'(1);
       write_gray <= '0;
+      read_limit <= ptr_t'(DEPTH);
+      wr_free <= ptr_t'(DEPTH);
       for (int stage = 0; stage < 4; stage++)
         read_gray_sync[stage] <= '0;
     end else begin
       read_gray_sync[0] <= read_gray;
       for (int stage = 1; stage < 4; stage++)
         read_gray_sync[stage] <= read_gray_sync[stage-1];
+      // The sampled RAM read cursor can only lag the reader. Register
+      // capacity for the pointer *after* any push accepted on this edge.
+      // Adding DEPTH modulo the pointer width toggles only the wrap bit.
+      read_limit <= binary(read_gray_sync[3]) ^ ptr_t'(DEPTH);
+      wr_free <= read_limit - (write_memory ? write_next : write_ptr);
       if (write_memory) begin
-        write_ptr <= write_ptr + 1'b1;
-        write_gray <= gray(write_ptr + 1'b1);
+        write_ptr <= write_next;
+        write_next <= write_next + 1'b1;
+        write_gray <= gray(write_next);
       end
     end
   end
@@ -80,7 +88,10 @@ module ironvideo_fifo #(
   always_ff @(posedge rd_clk) begin
     if (rd_rst) begin
       read_ptr <= '0;
+      read_previous <= '0;
       read_gray <= '0;
+      write_sample <= '0;
+      rd_count <= '0;
       rd_valid <= 1'b0;
       for (int stage = 0; stage < 4; stage++)
         write_gray_sync[stage] <= '0;
@@ -88,7 +99,12 @@ module ironvideo_fifo #(
       write_gray_sync[0] <= write_gray;
       for (int stage = 1; stage < 4; stage++)
         write_gray_sync[stage] <= write_gray_sync[stage-1];
+      // Count the held beat until the consumer pops it. Prefetching a
+      // replacement changes the RAM cursor but cannot consume that beat.
+      write_sample <= binary(write_gray_sync[3]);
+      rd_count <= rd_valid && !rd_pop ? count_with_held : count_after_pop;
       if (read_memory) begin
+        read_previous <= read_ptr;
         read_ptr <= read_ptr + 1'b1;
         read_gray <= gray(read_ptr + 1'b1);
         rd_valid <= 1'b1;

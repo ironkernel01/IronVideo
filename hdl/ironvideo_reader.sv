@@ -69,7 +69,7 @@ module ironvideo_reader #(
 );
   localparam int BEAT_BYTES = DATA_WIDTH / 8;
   localparam int BEAT_SHIFT = $clog2(BEAT_BYTES);
-  localparam logic [12:0] PAGE_BYTES = 13'd4096;
+  localparam int PAGE_BEAT_BITS = 12 - BEAT_SHIFT;
 
   typedef enum logic [2:0] {
     IDLE_ST, PLAN_ST, ADDRESS_ST, READ_ST, FAULT_ST, PACK_TAIL_ST
@@ -84,12 +84,7 @@ module ironvideo_reader #(
   logic reading_uv;
   logic [31:0] uv_line_addr;
 
-  logic [31:0] available_beats;
   logic [31:0] line_beats;
-  logic [12:0] page_bytes_left;
-  logic [12:0] page_beats;
-  logic [31:0] planned_beats;
-  logic [8:0] burst_beats;
   logic [31:0] burst_bytes;
 
   logic [8:0] beats_left;
@@ -107,19 +102,16 @@ module ironvideo_reader #(
   logic pack_pending, pack_high, pack_write, pack_first, pack_frame, pack_last;
   logic [DATA_WIDTH-1:0] pack_data;
 
-  assign available_beats = 32'(fifo_free);
   assign line_beats = bytes_left >> BEAT_SHIFT;
-  assign page_bytes_left = PAGE_BYTES - {1'b0, next_addr[11:0]};
-  assign page_beats = page_bytes_left >> BEAT_SHIFT;
-  assign burst_bytes = 32'(burst_beats) << BEAT_SHIFT;
-
-  always_comb begin
-    planned_beats = 32'(MAX_BURST);
-    if (planned_beats > line_beats)
-      planned_beats = line_beats;
-    if (planned_beats > 32'(page_beats))
-      planned_beats = 32'(page_beats);
-  end
+  // Addresses are beat-aligned. Page capacity minus one is the
+  // complement of the beat's position within the 4 KiB page.
+  wire [PAGE_BEAT_BITS-1:0] page_len = ~next_addr[11:BEAT_SHIFT];
+  wire [7:0] max_len = 8'(MAX_BURST - 1);
+  wire [7:0] page_or_max = page_len < PAGE_BEAT_BITS'(MAX_BURST - 1) ? 8'(page_len) : max_len;
+  wire [7:0] line_len = 8'(line_beats) - 8'd1;
+  wire short_line = line_beats[31:8] == 0 && line_beats[7:0] <= page_or_max;
+  wire [7:0] planned_len = short_line ? line_len : page_or_max;
+  wire [8:0] address_beats = {1'b0, m_axi_arlen} + 9'd1;
 
   assign m_axi_arid = '0;
   assign m_axi_arsize = 3'(BEAT_SHIFT);
@@ -148,8 +140,9 @@ module ironvideo_reader #(
   assign fifo_sol = fifo_write && (use_nv12 ? pack_first : line_start);
   assign row_extra_chroma = use_nv12 && !line_index[0];
   wire [31:0] reserve_beats = use_nv12 ? line_beats << 1 : line_beats;
-  wire launch = state == PLAN_ST && run && planned_beats != 0 &&
-                (row_busy || available_beats >= reserve_beats);
+  wire launch = state == PLAN_ST && run && line_beats != 0 &&
+                (row_busy || (reserve_beats[31:FIFO_AW+1] == 0 &&
+                              fifo_free >= reserve_beats[FIFO_AW:0]));
   assign row_start = launch && !row_busy;
   assign row_done = fifo_write && (use_nv12 ? pack_high && pack_last : plane_end);
 
@@ -221,7 +214,7 @@ module ironvideo_reader #(
       use_nv12 <= 1'b0;
       reading_uv <= 1'b0;
       uv_line_addr <= '0;
-      burst_beats <= '0;
+      burst_bytes <= '0;
       m_axi_araddr <= '0;
       m_axi_arlen <= '0;
       beats_left <= '0;
@@ -261,8 +254,7 @@ module ironvideo_reader #(
             state <= IDLE_ST;
           end else if (launch) begin
             m_axi_araddr <= next_addr;
-            m_axi_arlen <= 8'(planned_beats - 32'd1);
-            burst_beats <= 9'(planned_beats);
+            m_axi_arlen <= planned_len;
             line_start <= (bytes_left == line_bytes);
             frame_start <= (bytes_left == line_bytes) && (line_index == 0);
             row_busy <= 1'b1;
@@ -275,7 +267,8 @@ module ironvideo_reader #(
           if (!run)
             stop_requested <= 1'b1;
           if (m_axi_arready) begin
-            beats_left <= burst_beats;
+            beats_left <= address_beats;
+            burst_bytes <= 32'(address_beats) << BEAT_SHIFT;
             beat_addr <= m_axi_araddr;
             state <= READ_ST;
           end
@@ -389,7 +382,7 @@ module ironvideo_reader #(
       if (ar_stalled && (!m_axi_arvalid || {m_axi_araddr, m_axi_arlen} != stalled_ar))
         $fatal(1, "IronVideo changed a stalled AXI read request");
       if (m_axi_arvalid && (m_axi_araddr[BEAT_SHIFT-1:0] != 0 ||
-          32'(m_axi_araddr[11:0]) + burst_bytes > 32'(PAGE_BYTES)))
+          32'(m_axi_araddr[11:0]) + (32'(address_beats) << BEAT_SHIFT) > 32'd4096))
         $fatal(1, "IronVideo issued an unaligned or page-crossing read request");
       if (fifo_write && fifo_free == 0)
         $fatal(1, "IronVideo exhausted the reserved FIFO capacity");

@@ -5,7 +5,8 @@
 // SystemVerilog-2012.
 module tb_ironvideo_reader_limits;
   logic clk = 0;
-  wire [8:0] done;
+  wire [9:0] done;
+  ironvideo_fifo_credits fifo_credits (.done(done[9]));
 
   always #5ns clk = ~clk;
 
@@ -219,6 +220,71 @@ module ironvideo_reader_limits_case #(
     expect_idle(6);
     run = 0;
     expect_idle(6);
+    done = 1;
+  end
+endmodule
+
+// Exercise real FIFO credits with independent clocks, a held read beat,
+// full RAM, concurrent writes/pops, repeated pointer wrap, and credit recovery.
+module ironvideo_fifo_credits(output logic done = 0);
+  localparam int DEPTH = 8;
+  localparam int TOTAL = 96;
+  logic wr_clk = 0, rd_clk = 0, rst = 1, pop_enable = 0;
+  always #3.367 wr_clk = ~wr_clk;
+  initial begin
+    #1;
+    forever #3.599 rd_clk = ~rd_clk;
+  end
+  wire [3:0] capacity, count;
+  wire rd_valid;
+  wire [31:0] rd_data;
+  int written = 0, popped = 0, write_run = 0;
+  bit wrote_consecutively = 0;
+  wire push = !rst && written < TOTAL && capacity != 0;
+  wire pop = !rst && pop_enable && rd_valid;
+
+  ironvideo_fifo #(.DATA_WIDTH(32), .FIFO_AW(3)) fifo (
+    .wr_clk(wr_clk), .wr_rst(rst), .wr_push(push), .wr_data(32'(written)),
+    .wr_free(capacity), .wr_cursor(), .rd_clk(rd_clk), .rd_rst(rst),
+    .rd_pop(pop), .rd_cursor(), .rd_valid(rd_valid), .rd_data(rd_data), .rd_count(count)
+  );
+
+  always @(posedge wr_clk)
+    if (push) begin
+      written <= written + 1;
+      write_run <= write_run + 1;
+      if (write_run == DEPTH-1)
+        wrote_consecutively <= 1'b1;
+    end else
+      write_run <= 0;
+
+  always @(posedge rd_clk)
+    if (pop) begin
+      if (rd_data !== 32'(popped))
+        $fatal(1, "TEST FAIL: FIFO credit overwrite, got %h expected %h", rd_data, popped);
+      popped <= popped + 1;
+    end
+
+  always @(negedge wr_clk)
+    if (!rst && capacity > DEPTH - (written - popped - int'(rd_valid)))
+      $fatal(1, "TEST FAIL: FIFO reports more space than concurrently available");
+
+  always @(negedge rd_clk)
+    if (!rst && (count > written - popped || count < int'(rd_valid)))
+      $fatal(1, "TEST FAIL: FIFO reports an invalid conservative read count");
+
+  initial begin
+    repeat (6) @(negedge wr_clk);
+    rst = 0;
+    wait (written == DEPTH + 1);
+    repeat (8) @(negedge wr_clk);
+    if (capacity !== 0 || !rd_valid || rd_data !== 0 || !wrote_consecutively)
+      $fatal(1, "TEST FAIL: FIFO full boundary or back-to-back write");
+    pop_enable = 1;
+    wait (popped == TOTAL);
+    repeat (12) @(negedge wr_clk);
+    if (capacity !== DEPTH || count !== 0 || rd_valid || written != TOTAL)
+      $fatal(1, "TEST FAIL: FIFO did not recover capacity after drain");
     done = 1;
   end
 endmodule
