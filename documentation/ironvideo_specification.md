@@ -604,4 +604,14 @@ faults under representative DDR traffic. Exercise stop/drain, restart and
 firmware-to-Linux handoff before releasing memory. Physical mode support
 depends on the routed design and the attached display.
 
+## Contact IronKernel
+
+Bringing IronVideo to your board? IronKernel offers AMD FPGA design,
+bare-metal firmware and embedded Linux development, from board bring-up
+through device drivers and applications. For integration support, a reference
+design or custom development, tell us which board you use, the display mode
+you need and what you already have running.
+
+[IronKernel.com](https://ironkernel.com/) · [support@ironkernel.com](mailto:support@ironkernel.com)
+
 </div>

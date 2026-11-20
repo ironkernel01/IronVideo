@@ -19,5 +19,7 @@ $pdf = Join-Path $PSScriptRoot "$name.pdf"
 & $renderer -Name $name -Source $source -Output $pdf
 $preview = Join-Path $core "build/documentation/$name"
 & $validator -Pdf $pdf -OutputDirectory $preview
-$urls = @(Get-Content -LiteralPath (Join-Path $preview 'links.txt') | Select-Object -Skip 1)
-if ($urls.Count) { throw "Unexpected clickable links in $pdf" }
+$expectedUrls = @('https://ironkernel.com/', 'mailto:support@ironkernel.com')
+$urls = @(Get-Content -LiteralPath (Join-Path $preview 'links.txt') | Select-Object -Skip 1 |
+    ForEach-Object { ($_.Trim() -split '\s+', 3)[2] } | Sort-Object -Unique)
+if (Compare-Object $expectedUrls $urls) { throw "Unexpected contact link inventory in $pdf" }
