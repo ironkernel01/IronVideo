@@ -6,6 +6,7 @@
 module ironvideo_scanout #(
   parameter int DATA_WIDTH = 64,
   parameter int MAX_BURST = 64,
+  parameter int PACKED_READS = 1,
   parameter int FIFO_KIB = 16,
   parameter int ARQOS = 15,
   parameter int AXI_ID_WIDTH = 1,
@@ -538,7 +539,8 @@ module ironvideo_scanout #(
   ironvideo_reset pixel_reset (.clk(pixel_clk), .reset_n(reset_n), .rst(pixel_rst));
 
   ironvideo_reader #(.DATA_WIDTH(DATA_WIDTH), .MAX_BURST(MAX_BURST),
-           .FIFO_AW(FIFO_AW), .ARQOS(ARQOS), .AXI_ID_WIDTH(AXI_ID_WIDTH), .SUPPORT_NV12(FORMAT_MASK[3]))
+           .FIFO_AW(FIFO_AW), .ARQOS(ARQOS), .AXI_ID_WIDTH(AXI_ID_WIDTH),
+           .SUPPORT_NV12(FORMAT_MASK[3]), .PACKED_READS(PACKED_READS))
   reader (
     .clk(axi_clk), .rst(axi_rst), .run(reader_run),
     .base(active_config.base), .stride(active_config.stride),

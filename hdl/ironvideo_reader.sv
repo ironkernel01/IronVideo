@@ -1,7 +1,7 @@
 `timescale 1ns/1ps
 
 // IronVideo framebuffer reader, SystemVerilog-2012.
-// Revision 11-18-2026: initial single-outstanding AXI4 read scheduler.
+// Packed formats can overlap same-ID bursts within one reserved row.
 // Schedule aligned bursts by line, address page, and available FIFO space.
 // Mark frame and line boundaries and drain accepted reads on stop or error.
 module ironvideo_reader #(
@@ -10,7 +10,8 @@ module ironvideo_reader #(
   parameter int FIFO_AW = 9,
   parameter int ARQOS = 15,
   parameter int AXI_ID_WIDTH = 1,
-  parameter bit SUPPORT_NV12 = 0
+  parameter bit SUPPORT_NV12 = 0,
+  parameter int PACKED_READS = 1
 ) (
   // Memory AXI clock and active-high synchronous reset.
   input  logic                    clk,
@@ -120,6 +121,193 @@ module ironvideo_reader #(
   assign m_axi_arcache = 4'b0011;
   assign m_axi_arprot = 3'b000;
   assign m_axi_arqos = 4'(ARQOS);
+
+  if (PACKED_READS > 1 && !SUPPORT_NV12) begin : packed_reader
+    // The FIFO reservation is for a complete row. No later row is offered
+    // until the final response beat of this row has been written.
+    localparam int QUEUE_BITS = $clog2(PACKED_READS);
+    typedef struct packed {
+      logic [31:0] address;
+      logic [8:0] beats;
+      logic first_line, first_frame, end_row;
+    } request_t;
+    request_t requests [0:PACKED_READS-1];
+    request_t offered, successor;
+    logic [QUEUE_BITS-1:0] head, tail;
+    logic [QUEUE_BITS:0] pending;
+    logic configured, plan_valid, ar_valid, final_burst;
+
+    wire drained = !plan_valid && !ar_valid && pending == 0;
+    wire drop = !run || stop_requested || burst_faulted;
+    wire plan = configured && !drop && !plan_valid && !ar_valid &&
+                pending < (QUEUE_BITS+1)'(PACKED_READS) && line_beats != 0 &&
+                (row_busy || (line_beats[31:FIFO_AW+1] == 0 &&
+                              fifo_free >= line_beats[FIFO_AW:0]));
+    wire offer = plan_valid && !drop && !(r_transfer && (bad_response || bad_last));
+    wire enqueue = m_axi_arvalid && m_axi_arready;
+    wire retire = r_transfer && matching_id && m_axi_rlast;
+    wire [QUEUE_BITS-1:0] next_head = head == QUEUE_BITS'(PACKED_READS-1) ? '0 : head + 1'b1;
+    wire [QUEUE_BITS-1:0] next_tail = tail == QUEUE_BITS'(PACKED_READS-1) ? '0 : tail + 1'b1;
+    wire [31:0] offered_bytes = 32'(offered.beats) << BEAT_SHIFT;
+    wire advance_head = (retire && pending > 1) ||
+                        (enqueue && (pending == 0 || (retire && pending == 1)));
+
+    // AXI guarantees ordered completion for one ID. Bypass the incoming
+    // descriptor when it replaces the only queued request on the same edge.
+    assign successor = pending > 1 ? requests[next_head] : offered;
+    assign m_axi_arvalid = !rst && ar_valid;
+    assign m_axi_rready = !rst && pending != 0;
+    assign idle = rst || drained;
+    assign r_transfer = m_axi_rvalid && m_axi_rready;
+    assign matching_id = m_axi_rid == 0;
+    assign bad_response = !matching_id || m_axi_rresp != 0;
+    assign bad_last = matching_id && (m_axi_rlast != (beats_left == 9'd1));
+    assign burst_faulted = reported_resp_fault || reported_last_fault;
+    assign fifo_write = r_transfer && !drop && !bad_response && !bad_last;
+    assign fifo_data = m_axi_rdata;
+    assign fifo_sol = fifo_write && line_start;
+    assign fifo_sof = fifo_write && frame_start;
+    assign row_start = offer && !row_busy;
+    assign row_done = fifo_write && m_axi_rlast && final_burst;
+    assign row_extra_chroma = 1'b0;
+
+    always_ff @(posedge clk) begin
+      if (rst) begin
+        configured <= 1'b0;
+        plan_valid <= 1'b0;
+        ar_valid <= 1'b0;
+        m_axi_araddr <= '0;
+        m_axi_arlen <= '0;
+        offered <= '0;
+        next_addr <= '0;
+        bytes_left <= '0;
+        line_addr <= '0;
+        line_index <= '0;
+        row_busy <= 1'b0;
+        stop_requested <= 1'b0;
+        reported_resp_fault <= 1'b0;
+        reported_last_fault <= 1'b0;
+        resp_fault <= 1'b0;
+        last_fault <= 1'b0;
+        fault_addr <= '0;
+        pending <= '0;
+        head <= '0;
+        tail <= '0;
+        beat_addr <= '0;
+        beats_left <= '0;
+        line_start <= 1'b0;
+        frame_start <= 1'b0;
+        final_burst <= 1'b0;
+      end else begin
+        resp_fault <= 1'b0;
+        last_fault <= 1'b0;
+        if (!run)
+          stop_requested <= 1'b1;
+
+        if (!run && drained) begin
+          configured <= 1'b0;
+          row_busy <= 1'b0;
+          stop_requested <= 1'b0;
+          reported_resp_fault <= 1'b0;
+          reported_last_fault <= 1'b0;
+        end else if (run && !configured) begin
+          configured <= 1'b1;
+          next_addr <= base;
+          bytes_left <= line_bytes;
+          line_addr <= base;
+          line_index <= '0;
+        end
+
+        // Split ARLEN selection and the increment used by the producer.
+        // A speculative plan can be dropped. A published AR cannot.
+        if (plan) begin
+          plan_valid <= 1'b1;
+          m_axi_araddr <= next_addr;
+          m_axi_arlen <= planned_len;
+        end
+        if (plan_valid) begin
+          plan_valid <= 1'b0;
+          if (offer) begin
+            ar_valid <= 1'b1;
+            offered.address <= m_axi_araddr;
+            offered.beats <= address_beats;
+            offered.first_line <= !row_busy;
+            offered.first_frame <= !row_busy && line_index == 0;
+            offered.end_row <= bytes_left == (32'(address_beats) << BEAT_SHIFT);
+            row_busy <= 1'b1;
+          end
+        end
+        if (enqueue) begin
+          ar_valid <= 1'b0;
+          requests[tail] <= offered;
+          tail <= next_tail;
+          next_addr <= next_addr + offered_bytes;
+          bytes_left <= bytes_left - offered_bytes;
+        end
+
+        case ({enqueue, retire})
+          2'b10: pending <= pending + 1'b1;
+          2'b01: pending <= pending - 1'b1;
+          default: ;
+        endcase
+        if (retire)
+          head <= next_head;
+
+        if (r_transfer) begin
+          if ((bad_response && !reported_resp_fault) || (bad_last && !reported_last_fault))
+            fault_addr <= beat_addr;
+          if (bad_response && !reported_resp_fault) begin
+            resp_fault <= 1'b1;
+            reported_resp_fault <= 1'b1;
+          end
+          if (bad_last && !reported_last_fault) begin
+            last_fault <= 1'b1;
+            reported_last_fault <= 1'b1;
+          end
+          if (matching_id) begin
+            if (beats_left != 0) begin
+              beats_left <= beats_left - 9'd1;
+              beat_addr <= beat_addr + 32'(BEAT_BYTES);
+            end
+            line_start <= 1'b0;
+            frame_start <= 1'b0;
+          end
+        end
+
+        if (advance_head) begin
+          beat_addr <= successor.address;
+          beats_left <= successor.beats;
+          line_start <= successor.first_line;
+          frame_start <= successor.first_frame;
+          final_burst <= successor.end_row;
+        end
+
+        if (row_done) begin
+          row_busy <= 1'b0;
+          bytes_left <= line_bytes;
+          if (line_index == lines - 16'd1) begin
+            line_index <= '0;
+            line_addr <= base;
+            next_addr <= base;
+          end else begin
+            line_index <= line_index + 16'd1;
+            line_addr <= line_addr + stride;
+            next_addr <= line_addr + stride;
+          end
+        end
+      end
+    end
+
+    `ifndef SYNTHESIS
+    always @(posedge clk)
+      if (!rst) begin
+        assert (pending <= (QUEUE_BITS+1)'(PACKED_READS))
+          else $fatal(1, "IronVideo exceeded the packed read queue");
+        assert (!row_done || (pending == 1 && !ar_valid && !plan_valid))
+          else $fatal(1, "IronVideo crossed a packed row before draining");
+      end
+    `endif
+  end else begin : serial_reader
   assign m_axi_arvalid = !rst && (state == ADDRESS_ST);
   // A Y beat generates two FIFO words. Accept the next Y beat on the same
   // edge that writes the upper word. A stopped/faulted burst drains freely.
@@ -362,6 +550,8 @@ module ironvideo_reader #(
     end
   end
 
+  end
+
 `ifndef SYNTHESIS
   logic ar_stalled;
   logic [39:0] stalled_ar;
@@ -370,7 +560,8 @@ module ironvideo_reader #(
     if (DATA_WIDTH != 32 && DATA_WIDTH != 64 && DATA_WIDTH != 128)
       $fatal(1, "IronVideo AXI data width must be 32, 64, or 128 bits");
     if (MAX_BURST < 1 || MAX_BURST > 256 || FIFO_AW < 1 || FIFO_AW > 15 ||
-        ARQOS < 0 || ARQOS > 15 || AXI_ID_WIDTH < 1)
+        ARQOS < 0 || ARQOS > 15 || AXI_ID_WIDTH < 1 ||
+        PACKED_READS < 1 || PACKED_READS > 4 || (SUPPORT_NV12 && PACKED_READS != 1))
       $fatal(1, "IronVideo AXI reader parameters out of range");
   end
 

@@ -5,6 +5,7 @@
 module ironvideo_top #(
   parameter integer DATA_WIDTH = 64,
   parameter integer MAX_BURST = 64,
+  parameter integer PACKED_READS = 1,
   parameter integer FIFO_KIB = 16,
   parameter integer ARQOS = 15,
   parameter integer AXI_ID_WIDTH = 1,
@@ -63,9 +64,10 @@ module ironvideo_top #(
   output wire s_axi_rvalid,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI RREADY" *)
   input wire s_axi_rready,
+  // The interface advertises the maximum capability across PACKED_READS values.
   // Vivado infers data and ID widths from their ports. MAX_BURST
   // sets the request limit within the AXI4 ceiling of 256 beats.
-  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI ARADDR", X_INTERFACE_PARAMETER = "PROTOCOL AXI4, READ_WRITE_MODE READ_ONLY, ADDR_WIDTH 32, HAS_BURST 1, HAS_LOCK 1, HAS_CACHE 1, HAS_PROT 1, HAS_QOS 1, HAS_REGION 0, SUPPORTS_NARROW_BURST 0, MAX_BURST_LENGTH 256, NUM_READ_OUTSTANDING 1" *)
+  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI ARADDR", X_INTERFACE_PARAMETER = "PROTOCOL AXI4, READ_WRITE_MODE READ_ONLY, ADDR_WIDTH 32, HAS_BURST 1, HAS_LOCK 1, HAS_CACHE 1, HAS_PROT 1, HAS_QOS 1, HAS_REGION 0, SUPPORTS_NARROW_BURST 0, MAX_BURST_LENGTH 256, NUM_READ_OUTSTANDING 4" *)
   output wire [31:0] m_axi_araddr,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI ARLEN" *)
   output wire [7:0] m_axi_arlen,
@@ -114,7 +116,7 @@ module ironvideo_top #(
   endgenerate
 
   ironvideo_hdmi_7series #(
-    .DATA_WIDTH(DATA_WIDTH), .MAX_BURST(MAX_BURST), .FIFO_KIB(FIFO_KIB),
+    .DATA_WIDTH(DATA_WIDTH), .MAX_BURST(MAX_BURST), .PACKED_READS(PACKED_READS), .FIFO_KIB(FIFO_KIB),
     .ARQOS(ARQOS), .AXI_ID_WIDTH(AXI_ID_WIDTH), .FORMAT_MASK(FORMAT_MASK), .CLOCK_SELECT(CLOCK_SELECT)
   ) video (
     .axi_clk(axi_clk),

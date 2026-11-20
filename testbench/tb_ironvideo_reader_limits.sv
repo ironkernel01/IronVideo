@@ -5,7 +5,8 @@
 // SystemVerilog-2012.
 module tb_ironvideo_reader_limits;
   logic clk = 0;
-  wire [9:0] done;
+  wire [10:0] done;
+  ironvideo_packed_read_queue packed_reads (.done(done[10]));
   ironvideo_fifo_credits fifo_credits (.done(done[9]));
 
   always #5ns clk = ~clk;
@@ -285,6 +286,235 @@ module ironvideo_fifo_credits(output logic done = 0);
     repeat (12) @(negedge wr_clk);
     if (capacity !== DEPTH || count !== 0 || rd_valid || written != TOTAL)
       $fatal(1, "TEST FAIL: FIFO did not recover capacity after drain");
+    done = 1;
+  end
+endmodule
+
+// Drive four in-order ID-zero HP0 bursts before presenting any response.
+module ironvideo_packed_read_queue(output logic done = 0);
+  localparam logic [31:0] BASE = 32'h0ff0, STRIDE = 32'h210;
+  logic clk = 0, reset = 1, run = 0;
+  always #3.367 clk = ~clk;
+  logic [11:0] capacity = 63;
+  logic [31:0] active_row_bytes = 512;
+  logic arready = 0, rvalid = 0, rlast = 0, rid = 0;
+  logic [1:0] rresp = 0;
+  wire arvalid, rready, fifo_write, sol, sof, idle, row_start, row_done;
+  wire resp_fault, last_fault;
+  wire [31:0] araddr, fault_addr;
+  wire [7:0] arlen;
+
+  ironvideo_reader #(.DATA_WIDTH(64), .FIFO_AW(11), .MAX_BURST(16), .PACKED_READS(4)) reader (
+    .clk(clk), .rst(reset), .run(run), .base(BASE), .stride(STRIDE),
+    .line_bytes(active_row_bytes), .lines(16'd2), .fifo_free(capacity),
+    .fifo_write(fifo_write), .fifo_data(), .fifo_sof(sof), .fifo_sol(sol),
+    .m_axi_arid(), .m_axi_araddr(araddr), .m_axi_arlen(arlen),
+    .m_axi_arsize(), .m_axi_arburst(), .m_axi_arlock(), .m_axi_arcache(),
+    .m_axi_arprot(), .m_axi_arqos(), .m_axi_arvalid(arvalid), .m_axi_arready(arready),
+    .m_axi_rid(rid), .m_axi_rdata(64'd0), .m_axi_rresp(rresp), .m_axi_rlast(rlast),
+    .m_axi_rvalid(rvalid), .m_axi_rready(rready), .idle(idle), .row_busy(),
+    .row_start(row_start), .row_done(row_done), .resp_fault(resp_fault),
+    .last_fault(last_fault), .fault_addr(fault_addr),
+    .nv12(1'b0), .uv_base(32'd0), .uv_stride(32'd0), .row_extra_chroma()
+  );
+
+  int starts = 0, completions = 0;
+  always @(posedge clk) begin
+    if (row_start) starts <= starts + 1;
+    if (row_done) completions <= completions + 1;
+  end
+
+  task automatic take_ar(input logic [31:0] address, input int beats);
+    @(negedge clk);
+    while (!arvalid) @(negedge clk);
+    if (araddr !== address || arlen !== 8'(beats-1))
+      $fatal(1, "TEST FAIL: queued AR %h/%d expected %h/%d", araddr, arlen + 1, address, beats);
+    arready = 1;
+    @(posedge clk);
+    @(negedge clk);
+    arready = 0;
+  endtask
+
+  task automatic send_r(input bit last, write_expected,
+                        input bit start_line = 0, start_frame = 0, end_row = 0,
+                        input bit response_id = 0, input logic [1:0] status = 0);
+    @(negedge clk);
+    rvalid = 1;
+    rlast = last;
+    rresp = status;
+    rid = response_id;
+    @(posedge clk);
+    if (!rready || {fifo_write,sol,sof,row_done} !== {write_expected,start_line,start_frame,end_row})
+      $fatal(1, "TEST FAIL: queued R ready/write/SOL/SOF/end %b%b%b%b%b", rready,fifo_write,sol,sof,row_done);
+  endtask
+
+  task automatic send_burst(input int beats, input bit write_expected,
+                            input bit start_line = 0, start_frame = 0, end_row = 0);
+    for (int beat = 0; beat < beats; beat++)
+      send_r(beat == beats-1, write_expected, start_line && beat == 0,
+             start_frame && beat == 0, end_row && beat == beats-1);
+  endtask
+
+  task automatic finish_r;
+    @(negedge clk);
+    rvalid = 0;
+  endtask
+
+  task automatic restart;
+    @(negedge clk);
+    run = 0;
+    repeat (4) @(negedge clk);
+    if (!idle || arvalid || rready)
+      $fatal(1, "TEST FAIL: queued reader did not drain");
+    run = 1;
+  endtask
+
+  // Model 32 AXI clocks of command-to-data latency per burst, with a
+  // full-rate return channel. A single outstanding 16-beat reader would
+  // miss the 2,200-clock line budget even before refresh or other clients.
+  task automatic time_1080_row;
+    int posted = 0, retired = 0, in_burst = 0, returned = 0;
+    int command_ready [0:63], command_beats [0:63];
+    int the_cycle = 0;
+    logic [31:0] address = BASE;
+    active_row_bytes = 7680;
+    capacity = 960;
+    restart();
+    while (returned < 960 && the_cycle < 2200) begin
+      @(negedge clk);
+      arready = 1;
+      rvalid = posted > retired && the_cycle >= command_ready[retired];
+      rlast = rvalid && in_burst == command_beats[retired]-1;
+      @(posedge clk);
+      if (arvalid) begin
+        int limit;
+        limit = (4096 - int'(address[11:0])) / 8;
+        if (limit > 16) limit = 16;
+        if (limit > (BASE+7680-address)/8) limit = (BASE+7680-address)/8;
+        if (araddr !== address || arlen !== 8'(limit-1))
+          $fatal(1, "TEST FAIL: 1080p queued burst %d breaks line or page bounds", posted);
+        command_ready[posted] = the_cycle + 32;
+        command_beats[posted] = limit;
+        posted++;
+        address += 32'(limit*8);
+      end
+      if (rvalid) begin
+        if (!rready || !fifo_write || row_done !== (returned == 959))
+          $fatal(1, "TEST FAIL: 1080p queued return stalled or cut the row");
+        returned++;
+        if (rlast) begin
+          in_burst = 0;
+          retired++;
+        end else
+          in_burst++;
+      end
+      the_cycle++;
+    end
+    @(negedge clk);
+    run = 0;
+    arready = 0;
+    rvalid = 0;
+    if (returned != 960 || posted != 61 || retired != 61 || the_cycle > 1320)
+      $fatal(1, "TEST FAIL: 1080p queued row took %d clocks with %d/%d bursts and %d beats",
+             the_cycle, posted, retired, returned);
+    $display("IronVideo queued XRGB8888 row: %d beats in %d AXI clocks", returned, the_cycle);
+  endtask
+
+  initial begin
+    repeat (4) @(negedge clk);
+    reset = 0;
+    run = 1;
+    repeat (10) begin
+      @(negedge clk);
+      if (arvalid || row_start)
+        $fatal(1, "TEST FAIL: queued read without whole-row credit");
+    end
+    capacity = 64;
+    take_ar(BASE, 2);
+    take_ar(32'h1000, 16);
+    take_ar(32'h1080, 16);
+    take_ar(32'h1100, 16);
+    repeat (6) begin
+      @(negedge clk);
+      if (arvalid || !rready || idle)
+        $fatal(1, "TEST FAIL: queue allowed fifth read or lost outstanding requests");
+    end
+    send_burst(2, 1, 1, 1);
+    finish_r();
+    take_ar(32'h1180, 14);
+
+    // Return four consecutive bursts without gaps on the R channel.
+    repeat (3) send_burst(16, 1);
+    send_burst(14, 1, 0, 0, 1);
+    finish_r();
+    take_ar(BASE+STRIDE, 16);
+    take_ar(BASE+STRIDE+128, 16);
+    take_ar(BASE+STRIDE+256, 16);
+    take_ar(BASE+STRIDE+384, 16);
+    send_burst(16, 1, 1);
+    repeat (2) send_burst(16, 1);
+    send_burst(16, 1, 0, 0, 1);
+    finish_r();
+    take_ar(BASE, 2);
+
+    // A stalled, presented AR remains stable under stop, then must drain
+    // along with the older read. A foreign RLAST cannot retire either.
+    while (!arvalid) @(negedge clk);
+    run = 0;
+    repeat (4) begin
+      @(negedge clk);
+      if (!arvalid || araddr !== 32'h1000 || arlen !== 15 || idle)
+        $fatal(1, "TEST FAIL: stopped queued reader withdrew an AR");
+    end
+    take_ar(32'h1000, 16);
+    send_r(1, 0, 0, 0, 0, 1);
+    finish_r();
+    if (!resp_fault || last_fault || fault_addr != BASE || idle)
+      $fatal(1, "TEST FAIL: foreign RLAST changed queue position");
+    send_burst(2, 0);
+    send_burst(16, 0);
+    finish_r();
+    restart();
+
+    // Early RLAST retires only its own descriptor. An already-offered
+    // third AR can still be accepted, but no other address may be offered.
+    take_ar(BASE, 2);
+    take_ar(32'h1000, 16);
+    while (!arvalid) @(negedge clk);
+    send_r(1, 0);
+    finish_r();
+    if (!last_fault || resp_fault || fault_addr != BASE || idle)
+      $fatal(1, "TEST FAIL: early queued RLAST lost the following read");
+    take_ar(32'h1080, 16);
+    send_burst(16, 0);
+    send_burst(16, 0);
+    finish_r();
+    repeat (4) @(negedge clk);
+    if (!idle || arvalid || rready)
+      $fatal(1, "TEST FAIL: early RLAST drain issued new work");
+    restart();
+
+    // Accepting a late RLAST drains the original head even when its
+    // expected beat count has expired. The second read remains queued.
+    take_ar(BASE, 2);
+    take_ar(32'h1000, 16);
+    run = 0;
+    send_r(0, 0);
+    send_r(0, 0);
+    finish_r();
+    if (!last_fault || resp_fault || fault_addr !== BASE + 8 || idle)
+      $fatal(1, "TEST FAIL: missing queued RLAST did not hold the head");
+    send_r(1, 0);
+    send_r(0, 0, 0, 0, 0, 0, 2'b10);
+    finish_r();
+    if (!resp_fault || fault_addr !== 32'h1000 || idle)
+      $fatal(1, "TEST FAIL: queued response error used the wrong burst address");
+    for (int index = 1; index < 16; index++) send_r(index == 15, 0);
+    finish_r();
+    if (!idle || starts != 5 || completions != 2)
+      $fatal(1, "TEST FAIL: queued completions after drain starts=%d completions=%d idle=%b",
+             starts, completions, idle);
+    time_1080_row();
     done = 1;
   end
 endmodule
