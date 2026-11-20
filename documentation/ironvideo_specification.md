@@ -10,9 +10,11 @@
 <div class="brief-page">
 <div class="brief-brand"><img src="assets/ironkernel_logo.png" alt="IronKernel Embedded"></div>
 
-# IronVideo specification
+# IronVideo Specification
 
 <div class="brief-band">IronVideo is an AXI-compatible, bus-mastering RGB/YUV video core with low CPU overhead. It produces 320p, 480p, 720p and 1080p video to drive LCD and HDMI displays, including custom LCD configurations.</div>
+
+**Markdown design guide for AI-assisted integration.** Use the repository README with Claude or Codex to integrate the scanout RTL, program the shared firmware and Linux driver, and verify display timing and DDR service.
 
 The CPU sets the framebuffer address, stride, format and display timing over
 AXI4-Lite, then enables scanout. IronVideo generates the DDR read addresses,

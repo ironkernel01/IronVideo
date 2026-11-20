@@ -1,4 +1,4 @@
-# IronVideo
+# IronVideo integration and design guide
 
 IronVideo is a progressive framebuffer scanout core. It reads little-endian
 XRGB8888, RGB565, YUV422 (YUYV), or YUV420 (NV12) frames from DDR over a read-only AXI4 master, applies software-defined
@@ -25,10 +25,22 @@ uses 74.25/371.25 MHz for 720p60 and 148.5/742.5 MHz for experimental
 1080p60. The latter exceeds the rated clock network speed on the XC7Z020-1.
 Single-pair integrations use the default `CLOCK_SELECT=0`.
 
-The IronVideo specification covers the register interface, FPGA compatibility,
+The IronVideo Specification covers the register interface, FPGA compatibility,
 the bare-metal MicroBlaze demo on Nexys Video and Linux scanout on the Zynq-based Zybo Z7-20.
-[Read the specification](documentation/ironvideo_specification.md) or
+[Read the IronVideo Specification](documentation/ironvideo_specification.md) or
 [open the PDF](documentation/ironvideo_specification.pdf).
+
+This Markdown guide is the integration reference for engineers and AI coding assistants such as Claude and Codex. It connects the hardware contract to the portable driver, firmware, Linux KMS and the benches for each change.
+
+| Task | Start here | Verify |
+|---|---|---|
+| Integrate a raster or serializer | [Portable scanout](hdl/ironvideo_scanout.sv), [AXI-to-TMDS top](hdl/ironvideo_top.v) | Reset release, pixel and 5× clock relationship, lane ordering and complete serial raster |
+| Change burst scheduling or diagnostics | [DDR reader](hdl/ironvideo_reader.sv), [row statistics](hdl/ironvideo_row_stats.sv), [reader limits bench](testbench/tb_ironvideo_reader_limits.sv) | Row credit, 4 KiB splits, backpressure, stop with accepted reads, data order and counter meaning |
+| Change pixel formats | [Raster](hdl/ironvideo_raster.sv), [color conversion](hdl/ironvideo_color.sv), [format tests](testbench/tb_ironvideo_formats.sv) | Memory byte order, per-plane bounds, blanking and final RGB. Test NV12 UV pitch separately. |
+| Change software-visible features | [Register definitions](driver/ironvideo_regs.h), [portable API](driver/ironvideo_core.h), [U-Boot and KMS adapter](driver/ironvideo.c), [driver integration guide](driver/README.md) | Discover features from hardware, preserve earlier ABI behavior, and exercise both firmware and Linux. |
+| Reproduce board behavior | [Nexys standalone firmware](refdesign/nexys/README.md), [Zybo Linux reference](documentation/ironvideo_specification.md#zybo-z7-20-reference--linux-on-zynq-7000) | Measure frame count, read errors and underruns against elapsed time using the chosen format and mode. |
+
+## Hardware structure
 
 | Module | Interface and role |
 | --- | --- |
@@ -52,6 +64,7 @@ Compile `ironvideo_pkg.sv`, `ironvideo_reset.sv`, `ironvideo_fifo.sv`,
 | --- | ---: | --- |
 | `FORMAT_MASK` | 1 | Bit 0 enables XRGB8888, bit 1 RGB565, bit 2 YUV422 (YUYV), and bit 3 YUV420 (NV12). Any nonempty combination is valid. |
 | `DATA_WIDTH` | 64 | 32, 64, or 128 bits |
+| `PACKED_READS` | 1 | 1–4 queued same-ID requests within a packed row. Enabling NV12 requires 1. |
 | `MAX_BURST` | 64 | 1–256 AXI beats |
 | `FIFO_KIB` | 16 | Requested payload capacity in KiB, clamped to at least 16, rounded up to a power of two, maximum 128 |
 | `ARQOS` | 15 | 0–15 |
@@ -61,7 +74,7 @@ The read master issues full-width, aligned INCR bursts with ARLOCK=0,
 ARCACHE=3, and ARPROT=0. It reserves room for the entire active line before
 presenting its first request, then fetches that line without waiting for
 more FIFO space. Each burst is capped by the configured limit, remaining
-beats on the line, and the next 4 KiB boundary. Only one burst is in flight.
+beats on the line, and the next 4 KiB boundary. The default permits one outstanding request. Packed-only builds can post up to four same-ID reads within the reserved row.
 Packed reads keep RREADY asserted through the response. YUV420 reads may pause
 the R channel while inserting expanded FIFO beats. ARVALID and its payload remain
 stable until ARREADY, including during a stop. The reader skips stride padding
@@ -120,7 +133,7 @@ of a configuration, until the first framebuffer pixel is consumed.
 | --- | --- | --- | --- |
 | 0x00 | ID | RO | `0x49525644` |
 | 0x04 | VERSION | RO | `0x00010001` with the legacy XRGB8888-only mask, otherwise `0x00010002` |
-| 0x08 | CAPABILITIES | RO | Data width in bits [7:0], FIFO address bits [15:8], maximum burst beats [24:16] |
+| 0x08 | CAPABILITIES | RO | Data width in bits [7:0], FIFO address bits [15:8], maximum burst beats [24:16], optional clock selector [25] |
 | 0x0c | CONTROL | RW | [0] requested enable, [1] shadow test pattern, [2] commit, [3] snapshot. The two command bits read zero. Preserve bits [1:0] when issuing a snapshot. |
 | 0x10 | STATUS | RO | [0] valid configuration accepted, [1] configuration busy, [2] applied enable, [3] quiesced, [4] snapshot busy, [5] requested enable |
 | 0x14 | FAULT | W1C | [0] rejected control command, [1] non-OKAY RRESP or wrong RID, [2] unexpected RLAST position, [3] underflow or stream alignment loss. A new event wins over a simultaneous clear. |
@@ -161,6 +174,7 @@ of a configuration, until the first framebuffer pixel is consumed.
 | 0xa0, 0xa4 | UV_BASE, UV_STRIDE | RW shadow | v1.2 YUV420 chroma DMA address and byte stride |
 | 0xa8, 0xac | UV_WINDOW, UV_SIZE | RW shadow | v1.2 chroma aperture start and byte size |
 | 0xb0, 0xb4 | PEAK_RATE_CYCLES, PEAK_RATE_BYTES | RO | v1.2 read cycles first to clear the peak interval and latch its byte count |
+| 0xb8 | CLOCK_SELECT | RW/RO, CAPS[25] | Write the requested clock pair in bit 0 while quiesced. Read request, selection and ready in bits 0–2. |
 
 A commit validates the nominated pattern or framebuffer mode. Active and
 sync intervals must be positive. Either porch may be zero. Each axis total
@@ -303,10 +317,10 @@ is `DATA_WIDTH / 8 * axi_clk_hz`. RGB565 and YUV422 halve those reads.
 YUV420 uses three eighths of the XRGB8888 payload by reading each UV row once.
 Its repacker requires at least five AXI clocks per three DDR beats across
 a two-line group, giving an ideal 60% raw-capacity ceiling.
-For packed formats the scheduler has two idle AXI cycles
+With `PACKED_READS=1` the packed-format scheduler has two idle AXI cycles
 between bursts even with immediately ready AR and a response on the next
 cycle. With B beats per burst the ideal scheduler efficiency is B/(B+2)
-before arbitration, DDR response latency, R bubbles and short boundary bursts.
+before arbitration, DDR response latency, R bubbles and short boundary bursts. Posted reads can return adjacent bursts on consecutive clocks.
 A 32-bit port at 100 MHz has a 400 MB/s raw ceiling. Mode support needs
 measurement under the intended DDR contention and routed clock rates.
 
@@ -362,14 +376,22 @@ the horizontal intervals are 1280/110/40/220 pixels and the vertical
 intervals are 720/5/5/20 lines, in active/front porch/sync/back porch order.
 Both sync polarities are positive. An XRGB8888 line is 5,120 bytes. On a 128-bit
 port, a prefill of 320 beats buffers one packed row. The 1080p60 simulation
-uses 148.5 MHz pixel and 742.5 MHz serializer clocks. The Nexys design is limited to 720p60. Physical 1080p60 requires a
-different board with a transmitter and clock network rated for the serial link.
+uses 148.5 MHz pixel and 742.5 MHz serializer clocks. The Nexys design is limited to 720p60. The Zybo Linux reference has demonstrated physical 1080p60 as an engineering mode. Its 742.5 MHz serializer clock exceeds the XC7Z020-1 clock-network rating.
 
 The standalone `refdesign/nexys/` design uses an 80 MHz CPU/AXI clock,
 a 128-bit read master and all four formats. It runs its demonstration from BRAM.
 
 For the Linux platform, IronForge supplies the Nexys I/O pinout, clocking, CDC constraints, display
 timings, and U-Boot and Linux build integration. IronForge uses the complete
-IronVideo checkout directly in `rtl/ironvideo/`. Other projects provide their own
+sibling IronVideo checkout alongside IronForge. Other projects provide their own
 board policy and implementation constraints and instantiate the same RTL
 and driver directly from this checkout.
+
+
+## Zybo Linux configuration and change validation
+
+The Zybo Z7-20 reads XRGB8888 from DDR through its 64-bit HP0 port at 148.5 MHz. The 1080p60 configuration uses 16-beat requests, `PACKED_READS=4`, `ARQOS=15`, a 16 KiB FIFO and `FORMAT_MASK=7`. HP1 serves audio, HP2 capture, and HP3 the Baseline encoder. U-Boot can show the coordinate pattern before Linux takes over the DDR-backed console.
+
+To investigate a black display, run the pattern first. If the monitor locks and the raster frame count advances, enable a known linear framebuffer and verify format ID, aperture, pitch, DMA address and cache ownership. Compare FIFO low-water, row service time, outstanding read errors and the underrun count with the other DDR users active. Pattern mode generates no frame reads. A rising frame counter alone does not qualify memory scanout.
+
+When extending the ABI, update the register decode and capability bits, shared header, mode validation and the older-hardware fallback together. Exercise an invalid mode and stop/commit while requests are outstanding. Run the [simulation suite](simulate.ps1), check the [host driver test](driver/test_ironvideo_core.c), then confirm the actual board mode and error counters under load. Record the implemented AXI and serializer clocks alongside the observed result.

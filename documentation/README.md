@@ -1,6 +1,6 @@
 # IronVideo documentation
 
-The [IronVideo specification](ironvideo_specification.md) covers FPGA compatibility, registers, DDR measurement, firmware and Linux integration, and verification. It includes illustrated examples from the Nexys Video bare-metal MicroBlaze demo and the Zybo Z7-20 Linux demo. The [PDF](ironvideo_specification.pdf) is generated from the Markdown source.
+The [IronVideo Specification](ironvideo_specification.md) covers FPGA compatibility, registers, DDR measurement, firmware and Linux integration, and verification. It includes illustrated examples from the Nexys Video bare-metal MicroBlaze demo and the Zybo Z7-20 Linux demo. The [PDF](ironvideo_specification.pdf) is generated from the Markdown source.
 
 ## Publish the specification
 
