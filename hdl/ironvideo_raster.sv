@@ -60,12 +60,13 @@ module ironvideo_raster #(
 
   wire pending = config_sync[3] != config_ack;
   wire active = x < mode.ha && y < mode.va;
-  wire [15:0] h_sync_start = mode.ha + mode.hf;
-  wire [15:0] h_sync_end = h_sync_start + mode.hs;
-  wire [15:0] v_sync_start = mode.va + mode.vf;
-  wire [15:0] v_sync_end = v_sync_start + mode.vs;
-  wire end_line = x == h_sync_end + mode.hb - 16'd1;
-  wire end_frame = end_line && y == v_sync_end + mode.vb - 16'd1;
+  // The AXI-domain configuration supplies absolute sync and wrap endpoints.
+  wire [15:0] h_sync_start = mode.hf;
+  wire [15:0] h_sync_end = mode.hs;
+  wire [15:0] v_sync_start = mode.vf;
+  wire [15:0] v_sync_end = mode.vs;
+  wire end_line = x == mode.hb;
+  wire end_frame = end_line && y == mode.vb;
   wire origin = x == 0 && y == 0;
 
   wire start_frame = origin && fifo_valid && fifo_sof

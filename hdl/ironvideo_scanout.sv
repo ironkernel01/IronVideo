@@ -215,6 +215,8 @@ module ironvideo_scanout #(
   end else assign uv_valid = 1'b0;
   logic [16:0] h_active_front, h_sync_back, v_active_front, v_sync_back;
   logic [17:0] h_total, v_total;
+  logic [15:0] h_sync_end, v_sync_end;
+  logic [15:0] h_last, v_last;
   logic timing_nonzero;
   logic frame_fits;
   logic prefill_valid;
@@ -239,6 +241,10 @@ module ironvideo_scanout #(
     v_sync_back <= 17'(shadow.vs) + 17'(shadow.vb);
     h_total <= 18'(h_active_front) + 18'(h_sync_back);
     v_total <= 18'(v_active_front) + 18'(v_sync_back);
+    h_sync_end <= h_active_front[15:0] + shadow.hs;
+    v_sync_end <= v_active_front[15:0] + shadow.vs;
+    h_last <= h_total[15:0] - 16'd1;
+    v_last <= v_total[15:0] - 16'd1;
     timing_nonzero <= shadow.ha != 0 && shadow.va != 0
              && shadow.hs != 0 && shadow.vs != 0;
     valid_timing <= timing_nonzero && h_total[17:16] == 0 && v_total[17:16] == 0;
@@ -452,6 +458,14 @@ module ironvideo_scanout #(
               if (commit) begin
                 mode_commit_pending <= 1'b1;
                 active_config <= shadow;
+                // Software encodes intervals. Transfer their calculated
+                // endpoints in the same bundled raster configuration.
+                active_config.hf <= h_active_front[15:0];
+                active_config.hs <= h_sync_end;
+                active_config.hb <= h_last;
+                active_config.vf <= v_active_front[15:0];
+                active_config.vs <= v_sync_end;
+                active_config.vb <= v_last;
                 active_uv_base <= uv_base;
                 active_uv_stride <= uv_stride;
                 active_config.pattern <= write_data[1];
