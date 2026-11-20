@@ -12,7 +12,7 @@
 
 # IronVideo specification
 
-<div class="brief-band">IronVideo is an AXI4 bus master.</div>
+<div class="brief-band">IronVideo is an AXI-compatible, bus-mastering RGB/YUV video core with low CPU overhead. It produces 320p, 480p, 720p and 1080p video to drive LCD and HDMI displays, including custom LCD configurations.</div>
 
 The CPU sets the framebuffer address, stride, format and display timing over
 AXI4-Lite, then enables scanout. IronVideo generates the DDR read addresses,
@@ -606,11 +606,15 @@ depends on the routed design and the attached display.
 
 ## Contact IronKernel
 
-Bringing IronVideo to your board? IronKernel offers AMD FPGA design,
-bare-metal firmware and embedded Linux development, from board bring-up
-through device drivers and applications. For integration support, a reference
-design or custom development, tell us which board you use, the display mode
-you need and what you already have running.
+IronKernel offers fixed-price engineering services for AMD FPGAs, embedded
+Linux and bare-metal systems.
+
+- **Design review and board bring-up.** Review schematics and software, diagnose startup issues, and bring up the bootloader, Linux kernel, UART and Ethernet on your board.
+- **FPGA design and IP integration.** Integrate an IP core, start from a reference design, or develop custom logic for your application.
+- **Firmware, drivers and applications.** Develop bare-metal firmware, Linux drivers for FPGA blocks and peripherals, and embedded applications tuned to the hardware.
+
+For an integration review, a reference design or a custom development proposal,
+send us your target board, project goal and what you have running today.
 
 [IronKernel.com](https://ironkernel.com/) · [support@ironkernel.com](mailto:support@ironkernel.com)
 
