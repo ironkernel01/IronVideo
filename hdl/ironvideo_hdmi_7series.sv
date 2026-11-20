@@ -4,6 +4,7 @@
 module ironvideo_hdmi_7series #(
   parameter int DATA_WIDTH = 64,
   parameter int MAX_BURST = 64,
+  parameter int PACKED_READS = 1,
   parameter int FIFO_KIB = 16,
   parameter int ARQOS = 15,
   parameter int AXI_ID_WIDTH = 1,
@@ -108,7 +109,7 @@ module ironvideo_hdmi_7series #(
   end
 
   ironvideo_scanout #(
-    .DATA_WIDTH(DATA_WIDTH), .MAX_BURST(MAX_BURST), .FIFO_KIB(FIFO_KIB),
+    .DATA_WIDTH(DATA_WIDTH), .MAX_BURST(MAX_BURST), .PACKED_READS(PACKED_READS), .FIFO_KIB(FIFO_KIB),
     .ARQOS(ARQOS), .AXI_ID_WIDTH(AXI_ID_WIDTH), .FORMAT_MASK(FORMAT_MASK), .CLOCK_SELECT(CLOCK_SELECT)
   ) scanout (
     .axi_clk(axi_clk), .pixel_clk(selected_pixel), .reset_n(reset_n),

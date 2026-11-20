@@ -17,7 +17,7 @@ module tb_ironvideo_clock_select;
   wire awready, wready, arready, bvalid, rvalid;
   wire [1:0] bresp, rresp;
   wire [31:0] rdata;
-  ironvideo_top #(.CLOCK_SELECT(1)) dut (
+  ironvideo_top #(.CLOCK_SELECT(1), .FORMAT_MASK(7), .MAX_BURST(16), .PACKED_READS(4)) dut (
     .axi_clk(bus_clk), .reset_n(reset_n),
     .pixel_clk(pixel0), .serial_clk(serial0), .pixel_clk_alt(pixel1), .serial_clk_alt(serial1),
     .s_axi_awaddr(awaddr), .s_axi_awprot(3'b0), .s_axi_awvalid(awvalid), .s_axi_awready(awready),
@@ -63,6 +63,8 @@ module tb_ironvideo_clock_select;
     if (($time-t) != serial_period) $fatal(1,"wrong selected serializer clock period");
   endtask
   initial begin
+    if (dut.video.scanout.reader.PACKED_READS != 4)
+      $fatal(1,"packed reads did not reach the production reader");
     repeat (15) @(negedge bus_clk);
     reset_n = 1;
     poll('h08, 1<<25, 1<<25);
