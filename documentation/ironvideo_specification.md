@@ -12,7 +12,7 @@
 
 # IronVideo specification
 
-<div class="brief-band">Selectable RGB and YUV framebuffer scanout over read-only AXI4, with AXI4-Lite control and an AMD 7-series DVI-compatible TMDS option.</div>
+<div class="brief-band">A portable AXI4 framebuffer reader and RGB raster with AXI4-Lite control. Connect the pixel output to a board transmitter or serialize it in the FPGA.</div>
 
 IronVideo reads a software-owned framebuffer in DDR and produces registered RGB,
 data enable, horizontal sync and vertical sync. The portable SystemVerilog
@@ -23,16 +23,17 @@ the register definitions in `driver/ironvideo_regs.h`.
 | Interface | Contract |
 |---|---|
 | Control | 32-bit AXI4-Lite, byte strobes, readable shadow state |
-| Memory | Read-only AXI4, 32-bit byte addresses, 32/64/128-bit data, one outstanding burst |
+| Memory | Read-only AXI4, 32-bit byte addresses, 32/64/128-bit data, up to four outstanding bursts for packed formats |
 | Pixel | One output pixel per active pixel clock, with format-specific memory unpacking and registered 24-bit RGB and timing outputs |
 | TMDS | Three differential data pairs and one forwarded clock pair, 10-bit DDR serialization |
 | Diagnostics | Sticky faults and masked interrupt, coherent raster snapshots, live row timing and request counters |
 | Software | Shared portable driver for bare metal, U-Boot and Linux atomic DRM/KMS |
 
 The core accepts software-defined progressive timings within its register,
-alignment and FIFO limits. XRGB8888 at 720p60 has been demonstrated on a physical Nexys
-Video. Independent serialized 720p60 and 1080p60 tests provide simulation
-coverage. A board integrator supplies the memory fabric, clocks, resets,
+alignment and FIFO limits. The Nexys Video reference displays 720p60. The
+Zybo Z7-20 Linux reference displays XRGB8888 at 1080p60 as an engineering
+mode on the tested board. Independent serialized tests cover both timings.
+A board integrator supplies the memory fabric, clocks, resets,
 connector pinout and constraints, and the software memory map.
 
 </div>
@@ -65,6 +66,36 @@ Include the AMD I/O primitives for the 7-series backend.
 </div>
 <div class="brief-page">
 
+## FPGA compatibility
+
+The portable `ironvideo_scanout` interface supplies RGB, DE, HS and VS on
+the pixel clock. It can drive an external parallel-input video transmitter
+directly. For FPGA-generated TMDS, reuse the encoder and provide three
+serialized data pairs and one phase-aligned forwarded clock pair. The supplied
+`ironvideo_top` implements this last stage with AMD 7-series primitives.
+
+| FPGA family | TMDS output implementation | IronVideo evidence or porting work |
+|---|---|---|
+| AMD Artix-7 | Supplied cascaded OSERDESE2 lanes | Physical Nexys Video reference, 720p60 in all four formats. |
+| AMD Zynq-7000 | Supplied OSERDESE2 lanes in programmable logic | Physical Zybo Z7-20 reference, 720p60 and engineering 1080p60. |
+| AMD Spartan-7, Kintex-7, Virtex-7 | Same OSERDESE2 architecture | Candidate for the supplied wrapper. Select a suitable package, output bank, clock route and speed grade, then qualify the board. |
+| AMD Kintex and Virtex UltraScale / UltraScale+, Zynq UltraScale+ MPSoC | OSERDESE3 with 4:1 or 8:1 DDR gearing | A family-specific wrapper must repack the continuous 10-bit TMDS symbol stream into the serializer width and generate its clocks. |
+| AMD Versal devices with XPIO | XPHY via Advanced I/O Wizard | A new wrapper must adapt the symbol stream to the configured XPHY width and maintain data-lane and forwarded-clock alignment. |
+| Altera Cyclone 10 GX, Arria 10 | LVDS SERDES transmitter IP supports 10:1 gearing | A new wrapper must map the serialized bit order, provide any required memory-bus bridge, and connect a TMDS-compatible electrical output stage. |
+
+A family entry alone does not qualify a resolution. Check the actual pin
+bank, differential signaling or external line driver, permitted serializer
+clock and line rate for the speed grade. Verify the forwarded clock and all
+three data lanes at the connector. An LVDS serializer supplies gearing;
+the board must also meet the sink’s TMDS voltage and termination requirements.
+
+**Device references.** AMD UG471 / UG953 (7-series OSERDESE2), UG571
+(UltraScale SelectIO), AM010 / PG320 (Versal XPHY), and Altera document
+683520 (Arria 10 and Cyclone 10 GX LVDS SERDES IP, General Settings).
+
+</div>
+<div class="brief-page">
+
 ## DDR read master and FIFO
 
 | Parameter | Default | Values |
@@ -72,19 +103,24 @@ Include the AMD I/O primitives for the 7-series backend.
 | `FORMAT_MASK` | 1 | Select any nonempty subset of the four formats using bits [3:0]. A value of 15 enables all four. |
 | `DATA_WIDTH` | 64 | 32, 64 or 128 bits |
 | `MAX_BURST` | 64 | 1–256 beats |
+| `PACKED_READS` | 1 | 1–4 same-ID bursts within one row. A build that enables NV12 (`FORMAT_MASK[3]`) requires 1. |
 | `FIFO_KIB` | 16 | At least 16 KiB after clamping, rounded up to a power of two, maximum 128 KiB |
 | `ARQOS` | 15 | 0–15 |
 | `AXI_ID_WIDTH` | 1 | Positive width. Requests use ID zero. |
 | `FAMILY` | `"7SERIES"` | Public top accepts `"7SERIES"`. Other values fail at elaboration |
 
-The Vivado `M_AXI` metadata advertises the AXI4 ceiling of 256 beats.
+The public top passes `PACKED_READS` through the HDMI wrapper to the reader.
+Vivado interface metadata advertises ceilings of four outstanding reads and 256 beats.
 `MAX_BURST` controls actual requests. The master issues aligned, full-width
 INCR reads with ARLOCK=0, ARCACHE=3 and ARPROT=0. ARSIZE is the base-2 log of
 bytes per beat. ARLEN encodes beats minus one. Each request is limited by the
 configured maximum, the remaining row bytes, and the next 4 KiB boundary.
 
 The reader reserves credit for every beat of an active line before issuing its
-first address. It then reads the line without waiting for more credit. The
+first address. With multiple reads enabled, the reader can issue the next
+address while earlier data returns. A descriptor queue tracks burst length,
+address and row markers in response order. The final burst drains before
+the next row starts. The
 reader skips stride padding and wraps to the framebuffer base after the last
 row. AR payload stays stable through ARREADY, including when stop is pending.
 Packed inputs receive one beat per accepted response. The YUV420 repacker can apply R-channel backpressure while writing expanded FIFO beats. It expects ID zero,
@@ -131,7 +167,7 @@ has a falling edge at the start of a word. Differential outputs use OBUFDS.
 
 Supply a compatible I/O bank, TMDS electrical constraints and legal
 master/slave placement. Verify routed serializer timing and signal integrity.
-1080p60 in the table is a simulation example. The backend carries
+The Zybo reference section gives the measured 1080p60 result and timing limit. The backend carries
 DVI-compatible video and does not implement HDMI audio, infoframes, DDC/EDID
 or interlace.
 
@@ -152,7 +188,7 @@ registers return SLVERR. Reserved bits read zero.
 |---|---|---|---|
 | `0x00` | ID | RO | `0x49525644` |
 | `0x04` | VERSION | RO | `0x00010001` for the XRGB8888-only mask. All other masks implement `0x00010002`. |
-| `0x08` | CAPABILITIES | RO | [7:0] AXI data width in bits, [15:8] FIFO RAM address bits, [24:16] configured maximum burst beats |
+| `0x08` | CAPABILITIES | RO | [7:0] AXI data width in bits, [15:8] FIFO RAM address bits, [24:16] configured maximum burst beats, [25] clock-pair selection implemented |
 | `0x0c` | CONTROL | RW | [0] requested enable, [1] shadow pattern selection, [2] commit, [3] snapshot. Command bits [3:2] read zero. |
 | `0x10` | STATUS | RO | [0] a valid mode has been accepted, [1] configuration/enable transition busy, [2] applied enable, [3] quiesced, [4] snapshot busy, [5] requested enable |
 | `0x14` | FAULT | W1C | [0] rejected control, [1] non-OKAY RRESP or incorrect RID, [2] unexpected matching-ID RLAST position, [3] stream lock loss |
@@ -325,7 +361,7 @@ only enable preserves the row measurement epoch.
    clear. Check STATUS[0], STATUS[2] and faults. A rejected mode returns
    SLVERR and records the control fault.
 3. **Drain and apply.** An accepted commit or enable transition prevents new
-   reads and drains any presented address or accepted burst. The AXI domain
+   reads and drains the presented address and all accepted bursts. The AXI domain
    sends the final write cursor. The raster flushes through that cursor and
    applies the new state at the old frame boundary, or after the flush if
    stopped. Reads restart after acknowledgment. A live commit can blank part
@@ -403,10 +439,11 @@ under contention.
 | 1920 × 1080 at 148.5 MHz | 7,680 B | 497.664 MB/s | 14.815 µs |
 
 At 100 MHz, a 32-bit port has 400 MB/s raw capacity and a 128-bit port
-has 1,600 MB/s. For packed formats the scheduler has two idle AXI cycles between bursts under
+has 1,600 MB/s. With `PACKED_READS=1`, the packed scheduler has two idle AXI cycles between bursts under
 ideal request and response timing. A long sequence of full B-beat bursts
 therefore has an ideal payload fraction near `B / (B + 2)`. For 32-beat
-bursts this is about 94%. Use margin for DDR service gaps and monitor the FIFO
+bursts this is about 94%. With multiple same-ID reads queued, consecutive bursts can return
+on adjacent clocks. Use margin for DDR service gaps and monitor the FIFO
 low-water and fault counters under the intended concurrent workloads.
 
 The YUV420 repacker writes two FIFO beats per incoming Y beat. Across a
@@ -414,7 +451,7 @@ two-line group, two Y beats and one UV beat need at least five AXI clocks.
 The ideal sustained DDR payload ceiling is therefore 60% of raw AXI
 bandwidth before request overhead, arbitration and memory latency.
 
-A row sample runs from the first ARVALID after row reservation through the
+A row sample runs from the launch of the first address after row reservation through the
 final successful FIFO write. It includes AR stalls, R stalls and inter-burst
 gaps. Waiting for row credit and aborted rows are excluded. A synchronized
 64-bit Gray pixel timer supplies both timestamps. Tick quantization is
@@ -496,12 +533,47 @@ Physical output on the Nexys reference is limited to 720p60. The generic core ve
 </div>
 <div class="brief-page">
 
+## Zybo Z7-20 Linux reference
+
+On the Digilent Zybo Z7-20, Linux on the Zynq-7000 Cortex-A9 owns the DRM
+framebuffer in PS DDR. IronVideo reads it through the 64-bit HP0 port.
+The tested 1080p60 profile uses a 148.5 MHz AXI clock, 16-beat bursts,
+`PACKED_READS=4`, `ARQOS=15` and a 16 KiB FIFO. It enables XRGB8888,
+RGB565 and YUYV (`FORMAT_MASK=7`). Audio DMA uses HP1 and capture uses HP2.
+
+U-Boot can select `HDMI=1080p60` (default) or `720p60` and display the
+internal coordinate pattern before Linux starts. Linux takes over with a
+DDR-backed console and mirrors serial output to VT1. The standalone
+`ironforge-cube --mute` application draws into cached RAM, copies the
+changed rectangle to the active DRM buffer and restores the console on exit.
+
+<div style="width:76%;margin:0 auto"><img src="assets/zybo-linux-cube.png" alt="Zybo Linux framebuffer capture of the rotating multicolored cube with its top layer turning"></div>
+
+**Figure 2.** Native 1920 × 1080 XRGB8888 pixels read back from the active
+Zybo framebuffer during the muted demo. The camera was idle.
+
+| Physical measurement | Result |
+|---|---|
+| Linux console, four reads in flight | 4,204 raster frames in 70.07 s. Zero underruns, AXI read errors or faults. FIFO minimum 1,030 of 2,048 beats. |
+| DDR row service | Peak 1.158 GB/s. Longest measured row took 1,220 pixel clocks out of 2,200 per line. With one read in flight the earlier build recorded 1,892 underruns in 63.05 s. |
+| Cube, ARM temporarily at 333.33 MHz on USB power | 22.71 rendered frames/s over 12.023 s. Within one scanout epoch HDMI advanced 484 raster frames in 8.06 s (60.05 Hz), with zero underruns, read errors or faults. |
+
+The AXI domain closed setup/hold at +0.414/+0.052 ns. The 742.5 MHz
+serializer exceeded the XC7Z020-1 clock-network rating and missed the
+pulse-width check by 0.320 ns. The physical 1080p60 result applies to this
+board and monitor. The matched hardware and Linux integration are in
+`IronForge/platforms/zybo-z7-20/`; its board brief records the test conditions.
+
+</div>
+<div class="brief-page">
+
 ## Verification and bring-up
 
 | Regression | Checks |
 |---|---|
 | Portable scanout | Independent framebuffer and raster comparison at 32, 64 and 128 bits |
 | AXI reader limits | Burst caps of 1, 64 and 256, FIFO credit stalls and page boundaries |
+| Packed read queue | Overlapping same-ID requests, ordered data and markers, stalled address, stop/drain and response faults |
 | Row telemetry | Independent clocks, delayed DDR responses, aborts, extrema reads, backpressure and completion races |
 | Native formats | All 15 masks, live switching, per-plane apertures, NV12 chroma reuse and peak service rate |
 | Full-frame RGB | 720p60 startup and DDR-backed pixels with modeled arbitration and response stalls |
