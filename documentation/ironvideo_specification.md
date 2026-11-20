@@ -8,7 +8,7 @@
 </style>
 
 <div class="brief-page">
-<div class="brief-brand"><img src="assets/ironkernel_logo.png" alt="IronKernel Embedded"><span>Engineering specification<br>IronVideo register interface</span></div>
+<div class="brief-brand"><img src="assets/ironkernel_logo.png" alt="IronKernel Embedded"></div>
 
 # IronVideo specification
 
