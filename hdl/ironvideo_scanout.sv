@@ -158,6 +158,9 @@ module ironvideo_scanout #(
   logic row_start;
   logic row_done;
   logic row_saturated;
+  logic stats_read_pending, stats_snapshot_valid;
+  logic [7:0] stats_read_addr;
+  logic [3:0] stats_dma_status;
   logic [31:0] row_last;
   logic [31:0] row_bytes;
   logic [31:0] row_samples;
@@ -187,6 +190,14 @@ module ironvideo_scanout #(
   wire commit = control && write_data[2];
   wire snapshot_request = control && write_data[3];
   wire accept_read = s_axi_arready && s_axi_arvalid;
+  wire [3:0] dma_status = {read_fault, (m_axi_rready && !m_axi_rvalid),
+                           (m_axi_arvalid && !m_axi_arready), row_busy};
+  wire stats_read = accept_read && (
+      s_axi_araddr == REG_DMA_STATUS || s_axi_araddr == REG_ROW_LAST ||
+      s_axi_araddr == REG_ROW_BYTES || s_axi_araddr == REG_ROW_SAMPLES ||
+      s_axi_araddr == REG_ROW_WORST || s_axi_araddr == REG_ROW_BEST ||
+      (EXTENDED_ABI && (s_axi_araddr == REG_PEAK_RATE_CYCLES ||
+                        s_axi_araddr == REG_PEAK_RATE_BYTES)));
 
   wire [31:0] line_bytes = plane_row_bytes(shadow.format, shadow.ha);
   wire [31:0] active_line_bytes = plane_row_bytes(active_config.format, active_config.ha);
@@ -293,14 +304,6 @@ module ironvideo_scanout #(
     register_value[REG_FAULT_XY / 4] = {snapshot.fault_y, snapshot.fault_x};
     register_value[REG_FAULT_ADDR / 4] = first_addr;
     register_value[REG_FIFO_BYTES / 4] = 32'(FIFO_PAYLOAD_BYTES);
-    register_value[REG_DMA_STATUS / 4] = {27'b0, row_saturated, read_fault,
-                                       (m_axi_rready && !m_axi_rvalid),
-                                       (m_axi_arvalid && !m_axi_arready), row_busy};
-    register_value[REG_ROW_LAST / 4] = row_last;
-    register_value[REG_ROW_BYTES / 4] = row_bytes;
-    register_value[REG_ROW_SAMPLES / 4] = row_samples;
-    register_value[REG_ROW_WORST / 4] = row_worst;
-    register_value[REG_ROW_BEST / 4] = row_best;
     register_value[REG_READ_BEATS / 4] = read_beats;
     register_value[REG_READ_BURSTS / 4] = read_bursts;
     register_value[REG_READ_ERRORS / 4] = read_errors;
@@ -310,8 +313,6 @@ module ironvideo_scanout #(
     register_value[REG_UV_STRIDE / 4] = uv_stride;
     register_value[REG_UV_WINDOW / 4] = uv_window;
     register_value[REG_UV_SIZE / 4] = uv_size;
-    register_value[REG_PEAK_RATE_CYCLES / 4] = peak_rate_cycles;
-    register_value[REG_PEAK_RATE_BYTES / 4] = peak_rate_bytes;
     register_value[REG_CLOCK_SELECT / 4] = {29'b0,clock_ready,clock_active,clock_request};
 
     read_known = (s_axi_araddr <= (EXTENDED_ABI ? REG_PEAK_RATE_BYTES : REG_READ_ERRORS)
@@ -327,7 +328,7 @@ module ironvideo_scanout #(
 
   assign s_axi_awready = !axi_rst && !aw_pending && !write_response_valid;
   assign s_axi_wready = !axi_rst && !w_pending && !write_response_valid;
-  assign s_axi_arready = !axi_rst && !read_response_valid;
+  assign s_axi_arready = !axi_rst && !read_response_valid && !stats_read_pending;
   assign s_axi_bvalid = !axi_rst && write_response_valid;
   assign s_axi_rvalid = !axi_rst && read_response_valid;
   assign clear_faults = accept_write && write_addr == REG_FAULT && low_byte
@@ -348,6 +349,9 @@ module ironvideo_scanout #(
       s_axi_rdata <= '0;
       s_axi_rresp <= OKAY;
       read_response_valid <= 1'b0;
+      stats_read_pending <= 1'b0;
+      stats_read_addr <= '0;
+      stats_dma_status <= '0;
       shadow <= '0;
       clock_request <= 1'b0;
       window_base <= '0;
@@ -489,7 +493,26 @@ module ironvideo_scanout #(
 
       if (read_response_valid && s_axi_rready)
         read_response_valid <= 1'b0;
-      if (accept_read) begin
+      if (stats_read) begin
+        stats_read_pending <= 1'b1;
+        stats_read_addr <= s_axi_araddr;
+        stats_dma_status <= dma_status;
+      end else if (stats_snapshot_valid) begin
+        stats_read_pending <= 1'b0;
+        read_response_valid <= 1'b1;
+        s_axi_rresp <= OKAY;
+        case (stats_read_addr)
+          REG_DMA_STATUS: s_axi_rdata <= {27'b0, row_saturated, stats_dma_status};
+          REG_ROW_LAST: s_axi_rdata <= row_last;
+          REG_ROW_BYTES: s_axi_rdata <= row_bytes;
+          REG_ROW_SAMPLES: s_axi_rdata <= row_samples;
+          REG_ROW_WORST: s_axi_rdata <= row_worst;
+          REG_ROW_BEST: s_axi_rdata <= row_best;
+          REG_PEAK_RATE_CYCLES: s_axi_rdata <= peak_rate_cycles;
+          REG_PEAK_RATE_BYTES: s_axi_rdata <= peak_rate_bytes;
+          default: s_axi_rdata <= '0;
+        endcase
+      end else if (accept_read) begin
         read_response_valid <= 1'b1;
         s_axi_rdata <= read_value;
         s_axi_rresp <= read_known ? OKAY : SLVERR;
@@ -530,6 +553,7 @@ module ironvideo_scanout #(
     .take_peak(accept_read && EXTENDED_ABI && s_axi_araddr == REG_PEAK_RATE_CYCLES),
     .peak_cycles(peak_rate_cycles), .peak_bytes_latched(peak_rate_bytes),
     .row_start(row_start), .row_done(row_done),
+    .snapshot_read(stats_read), .snapshot_valid(stats_snapshot_valid),
     .read_beat(m_axi_rvalid && m_axi_rready), .read_burst(m_axi_arvalid && m_axi_arready),
     .read_error(resp_fault || last_fault),
     .take_worst(accept_read && s_axi_araddr == REG_ROW_WORST),

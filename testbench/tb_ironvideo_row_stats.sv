@@ -1,10 +1,12 @@
 `timescale 1ns/1ps
 
 module tb_ironvideo_row_stats;
-  wire [2:0] done;
+  wire [3:0] done;
   ironvideo_row_stats_case #(.DATA_WIDTH(32), .FIFO_KIB(8), .EXPECTED_KIB(16)) width32 (.done(done[0]));
   ironvideo_row_stats_case #(.DATA_WIDTH(64), .FIFO_KIB(16), .EXPECTED_KIB(16)) width64 (.done(done[1]));
   ironvideo_row_stats_case #(.DATA_WIDTH(128), .FIFO_KIB(17), .EXPECTED_KIB(32)) width128 (.done(done[2]));
+
+  ironvideo_row_stats_pipeline pipeline (.done(done[3]));
 
   initial begin
     wait (&done);
@@ -312,6 +314,146 @@ module ironvideo_row_stats_case #(
     expect_reg(ERRORS, 1);
     expect_reg(DMA_STATUS, 8, 5'h1f);
     expect_reg(FAULT, 2, 2);
+    done = 1;
+  end
+endmodule
+
+// Exercise cycle-adjacent events and large timer distances independently of
+// the DDR reader, which cannot produce those cases in a short simulation.
+module ironvideo_row_stats_pipeline (output logic done = 0);
+  logic axi_clk = 0, pixel_clk = 0, rst = 1;
+  always #3.367 axi_clk = ~axi_clk;
+  initial begin
+    #1;
+    forever #3.599 pixel_clk = ~pixel_clk;
+  end
+
+  logic [63:0] timestamp = 0;
+  logic clear = 0, row_start = 0, row_done = 0, extra = 0, count_bus = 0;
+  logic take_worst = 0, take_best = 0, take_peak = 0;
+  logic check_pixel = 0;
+  wire snapshot_valid, saturated;
+  wire [31:0] last, bytes, samples, worst, best, peak, peak_bytes, beats, bursts, errors;
+  ironvideo_row_stats stats (
+    .pixel_clk(pixel_clk), .pixel_rst(rst), .axi_clk(axi_clk), .axi_rst(rst),
+    .clear_mode(clear), .mode_row_bytes(32'd64), .row_extra_chroma(extra),
+    .row_start(row_start), .row_done(row_done),
+    .read_beat(count_bus), .read_burst(count_bus), .read_error(count_bus),
+    .take_worst(take_worst), .take_best(take_best), .take_peak(take_peak),
+    .snapshot_read(take_peak), .snapshot_valid(snapshot_valid),
+    .last_cycles(last), .row_bytes(bytes), .samples(samples),
+    .worst_cycles(worst), .best_cycles(best), .peak_cycles(peak),
+    .peak_bytes_latched(peak_bytes), .beats(beats), .bursts(bursts), .errors(errors),
+    .saturated(saturated)
+  );
+
+  task automatic event_at(input logic [63:0] tick,
+                          input bit begin_row, end_row,
+                          input bit chroma = 0, take = 0, mode = 0);
+    @(negedge axi_clk);
+    timestamp = tick;
+    row_start = begin_row;
+    row_done = end_row;
+    extra = chroma;
+    take_worst = take;
+    take_best = take;
+    take_peak = take;
+    clear = mode;
+  endtask
+
+  task automatic expect_row(input logic [31:0] duration, size, count, high, low,
+                            input logic clamped);
+    if ({last, bytes, samples, worst, best, saturated} !==
+        {duration, size, count, high, low, clamped})
+      $fatal(1, "TEST FAIL: pipeline last=%h bytes=%d samples=%d extrema=%h/%h saturated=%b",
+             last, bytes, samples, worst, best, saturated);
+  endtask
+
+  // The real pixel-clock increment and encoded CDC source cross a limb
+  // boundary together, changing one Gray bit on every tick.
+  initial begin
+    wait (check_pixel);
+    repeat (65540) begin
+      logic [63:0] previous;
+      previous = stats.pixel_ticks;
+      @(posedge pixel_clk);
+      #0.001;
+      if (stats.pixel_ticks !== previous + 1 ||
+          stats.pixel_ticks_gray !== (stats.pixel_ticks ^ (stats.pixel_ticks >> 1)))
+        $fatal(1, "TEST FAIL: pixel clock carry or Gray code at %h", previous);
+    end
+  end
+
+  initial begin
+    repeat (4) @(negedge axi_clk);
+    rst = 0;
+    @(negedge pixel_clk);
+    check_pixel = 1;
+    force stats.axi_ticks = timestamp;
+
+    // A mixed-width borrow across the timer wrap gives a small duration.
+    event_at(64'hffff_ffff_ffff_fffc, 1, 0);
+    event_at(64'h3, 1, 1);
+    // Reads see the preceding result, then the coincident row wins a take.
+    event_at(64'h10, 0, 1, 1, 1);
+    event_at(64'h10, 0, 0);
+    repeat (2) @(negedge axi_clk);
+    if (!snapshot_valid)
+      $fatal(1, "TEST FAIL: peak snapshot did not follow its event");
+    expect_row(7, 64, 1, 7, 7, 0);
+    @(negedge axi_clk);
+    expect_row(13, 128, 2, 13, 13, 0);
+    if (peak !== 13 || peak_bytes !== 64)
+      $fatal(1, "TEST FAIL: peak consume did not latch bytes or preserve the same-cycle completion");
+
+    // 7 ticks for B is slower than 13 ticks for 2B. 6 ticks for B is faster.
+    event_at(64'h0a, 0, 1);
+    event_at(64'h09, 0, 1);
+    event_at(64'h09, 0, 0);
+    repeat (2) @(negedge axi_clk);
+    if (peak !== 13)
+      $fatal(1, "TEST FAIL: slower single-plane sample replaced peak");
+    @(negedge axi_clk);
+    expect_row(6, 64, 4, 13, 6, 0);
+    if (peak !== 6)
+      $fatal(1, "TEST FAIL: odd tick count comparison lost a peak rate");
+
+    // Multiple upper limbs borrow while saturating the visible difference.
+    event_at(64'h0001_0000_0000_0002, 0, 1);
+    event_at(0, 0, 0);
+    repeat (3) @(negedge axi_clk);
+    expect_row(32'hffffffff, 64, 5, 32'hffffffff, 6, 1);
+    event_at(3, 0, 1);
+    event_at(3, 0, 0);
+    repeat (3) @(negedge axi_clk);
+    expect_row(1, 64, 6, 32'hffffffff, 1, 1);
+
+    // Mode clear discards its own sample/take, publishes new row bytes, and
+    // subsequent completions populate the new epoch in pipeline order.
+    event_at(10, 0, 1, 1, 1, 1);
+    event_at(11, 1, 0);
+    event_at(15, 0, 1);
+    event_at(16, 0, 0);
+    @(negedge axi_clk);
+    expect_row(0, 64, 0, 0, 0, 0);
+    repeat (2) @(negedge axi_clk);
+    expect_row(4, 64, 1, 4, 4, 0);
+    if (peak !== 4 || peak_bytes !== 0)
+      $fatal(1, "TEST FAIL: mode clear did not reset peak state");
+
+    // The low counter limb can stay at all ones during an idle cycle.
+    count_bus = 1;
+    repeat (65535) @(negedge axi_clk);
+    count_bus = 0;
+    @(negedge axi_clk);
+    if ({beats, bursts, errors} !== {3{32'h0000ffff}})
+      $fatal(1, "TEST FAIL: bus counters did not reach the rollover boundary");
+    count_bus = 1;
+    @(negedge axi_clk);
+    count_bus = 0;
+    if ({beats, bursts, errors} !== {3{32'h00010000}})
+      $fatal(1, "TEST FAIL: bus counter lost the carry across an idle cycle");
+    release stats.axi_ticks;
     done = 1;
   end
 endmodule
