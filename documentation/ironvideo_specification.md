@@ -12,7 +12,7 @@
 
 # IronVideo specification
 
-<div class="brief-band">IronVideo is an AXI4 bus master. Once configured, it reads the framebuffer from DDR on every frame without CPU intervention.</div>
+<div class="brief-band">IronVideo is an AXI4 bus master.</div>
 
 The CPU sets the framebuffer address, stride, format and display timing over
 AXI4-Lite, then enables scanout. IronVideo generates the DDR read addresses,
